@@ -1,0 +1,5 @@
+module CShaderc {
+    umbrella header "include/shim.h"
+    link framework "shaderc"
+    export *
+}

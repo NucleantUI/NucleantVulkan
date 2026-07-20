@@ -1,0 +1,7 @@
+framework module shaderc {
+    header "shaderc.h"
+    header "env.h"
+    header "status.h"
+    header "visibility.h"
+    export *
+}

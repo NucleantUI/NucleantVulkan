@@ -1,0 +1,4 @@
+module CSPIRVCross {
+    header "spirv_cross_c.h"
+    export *
+}

@@ -1,0 +1,8 @@
+// Exposes the wgpu-native C API to Swift for this package only.
+// SulphurCore deliberately does not ship these headers; the path below
+// points at the same wgpu-native SDK the ThorVG framework was built
+// against (wgpu.h pulls in webgpu.h itself).
+module CWgpu [system] {
+    header "/Volumes/CodeSSD/dev_projects/sulphur_dev/thorvg-cython/wgpu-native-macos/include/webgpu/wgpu.h"
+    export *
+}

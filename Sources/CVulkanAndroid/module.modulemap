@@ -1,0 +1,5 @@
+module CVulkan {
+    umbrella header "shim.h"
+    link "vulkan"
+    export *
+}
