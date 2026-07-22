@@ -91,6 +91,13 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // let id = ObjectIdentifier(node).hashValue
         // ^ replaced (update-render-system.md): identity is the canvas-owned
         //   Int id carried by RenderNode, never derived from the node object.
+        // Free the outgoing slot's GPU resources before it leaves the list —
+        // the slot routes to its node's destroyResources. Without this every
+        // removal (widget detach, resize) strands the node's VkImage on the
+        // device, the exact leak that used to need a separate engine call.
+        if let node = nodes.first(where: { $0.id == id }) {
+            node.destroyResources(engine: self)
+        }
         nodes.removeAll { $0.id == id }
         releaseTracking(of: id)
     }
@@ -104,6 +111,10 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // ^ replaced, same as remove(id:) — see note there.
         releaseTracking(of: id)
         if let index = nodes.firstIndex(where: { $0.id == id }) {
+            // Same-id swap (resize): the caller has already built the
+            // replacement (it's in `context`), so the outgoing node's image
+            // is now orphaned — free it before installing the new slot.
+            nodes[index].destroyResources(engine: self)
             nodes[index] = .new(id: id, context: context)
         } else {
             nodes.append(.new(id: id, context: context))
@@ -123,42 +134,12 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         warnedFailedNodes.remove(id)
     }
 
-    /// The GPU-side counterpart of `remove(_:)`: destroys the VkImage /
-    /// view / memory behind a node this engine built. `remove` only takes
-    /// the node out of the composite list — without this, every node
-    /// rebuild (frame resize) strands a full image on the device. Drains
-    /// the device first so no in-flight frame still references the image.
-    /// The wgpu texture the image was imported from is the canvas's to
-    /// release, after retargeting ThorVG away from it.
-    // public func destroyResources(of node: ThorShaderNode) {
-    //     vkDeviceWaitIdle(device)
-    //     vkDestroyImageView(device, node.imageView, nil)
-    //     vkDestroyImage(device, node.image, nil)
-    //     if let memory = node.memory {
-    //         vkFreeMemory(device, memory, nil)
-    //     }
-    // }
-
-    /// Same contract for a CPU-fed node — plus its staging buffer, which
-    /// is persistently mapped and must be unmapped before the free, and
-    /// the source-sized upload image a scaled node blits through.
-    // public func destroyResources(of node: PixelBufferShaderNode) {
-    //     vkDeviceWaitIdle(device)
-    //     vkUnmapMemory(device, node.stagingMemory)
-    //     vkDestroyBuffer(device, node.stagingBuffer, nil)
-    //     vkFreeMemory(device, node.stagingMemory, nil)
-    //     vkDestroyImageView(device, node.imageView, nil)
-    //     vkDestroyImage(device, node.image, nil)
-    //     if let memory = node.memory {
-    //         vkFreeMemory(device, memory, nil)
-    //     }
-    //     if let uploadImage = node.uploadImage {
-    //         vkDestroyImage(device, uploadImage, nil)
-    //     }
-    //     if let uploadMemory = node.uploadMemory {
-    //         vkFreeMemory(device, uploadMemory, nil)
-    //     }
-    // }
+    // GPU-side teardown of a node's VkImage/view/memory lives on the node
+    // now, not here: `VulkanRenderNode.destroyResources(_:)`, called through
+    // the slot's `destroyResources(engine:)`. That keeps node-kind-specific
+    // teardown (a CPU-fed node's staging buffer, a Skia node's surface) out
+    // of the generic engine — the engine only takes the slot out of the
+    // composite list via `remove(id:)`.
 
     /// Called at the start of every frame with Δt — mutate nodes / set `dirty`
     /// here to drive animation.
@@ -377,6 +358,12 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
 
     deinit {
         vkDeviceWaitIdle(device)
+        // Free every live slot's node resources before the device is torn
+        // down — each routes to its node's destroyResources. vkDestroyDevice
+        // would reclaim the memory regardless, but explicit teardown keeps
+        // the validation layers quiet about images outliving their device.
+        for node in nodes { node.destroyResources(engine: self) }
+        nodes.removeAll()
         for pool in nodeDescriptorPools.values { vkDestroyDescriptorPool(device, pool, nil) }
         composite = nil   // destroys its pipeline/layouts before the device goes away
         destroySwapchainObjects()
@@ -799,8 +786,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         let scissor = VkRect2D(offset: VkOffset2D(x: 0, y: 0), extent: extent)
 
         for node in nodes {
-            //recordComposite(of: node, cmd: cmd, viewport: viewport, scissor: scissor)
-            node.recordComposite(engine: self, cmd: cmd, viewport: viewport, scissor: scissor)
+            recordComposite(of: node, cmd: cmd, viewport: viewport, scissor: scissor)
         }
 
         vkCmdEndRenderPass(cmd)

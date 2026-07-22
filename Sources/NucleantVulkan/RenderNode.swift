@@ -22,8 +22,12 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     
     
     func update(engine: Engine, cmd: VkCommandBuffer)
-    
-    func recordComposite(engine: Engine, cmd: VkCommandBuffer, viewport: VkViewport, scissor:  VkRect2D )
+
+    // recordComposite lives on the engine, not here: sampling a node's
+    // published image onto the swapchain is identical for every node kind
+    // (it only needs `getImageView()`), so it's engine-generic — see
+    // VulkanRenderEngine.recordComposite(of:). Per-node work that actually
+    // differs (canvas draw + layout barriers) is what `update` carries.
 
     func destroyResources(engine: Engine)
     
