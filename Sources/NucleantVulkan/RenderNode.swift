@@ -26,6 +26,8 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     func recordComposite(engine: Engine, cmd: VkCommandBuffer, viewport: VkViewport, scissor:  VkRect2D )
 
     func destroyResources(engine: Engine)
+    
+    func getImageView() -> VkImageView?
 }
 
 extension RenderContainerNode {

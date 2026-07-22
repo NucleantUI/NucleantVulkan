@@ -21,4 +21,9 @@ public protocol VulkanRenderNode: AnyObject, Observable, Sendable {
     var computeLayout:        VkPipelineLayout? { get set }
     var computeDescriptorSet: VkDescriptorSet?  { get set }
     var dirty:                Bool              { get set }
+    
+    associatedtype ContainerNode: RenderContainerNode
+    associatedtype Engine: VulkanRenderEngine<ContainerNode>
+    
+    func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer)
 }

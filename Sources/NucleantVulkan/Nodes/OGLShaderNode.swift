@@ -1,5 +1,13 @@
+//
+//  OGLShaderNode.swift
+//  NucleantVulkan
+//
+import Observation
+@preconcurrency import CVulkan
+
+
 @Observable
-public final class OGLShaderNode: VulkanRenderNode {
+public final class OGLShaderNode: VulkanRenderNode, @unchecked Sendable {
 
     // public struct TextureInput {
     // ^ promoted to an @Observable class: a struct copy freezes the

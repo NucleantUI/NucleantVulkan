@@ -69,8 +69,10 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     public let graphicsQueue:    VkQueue
     public let queueFamilyIndex: UInt32
     public let commandPool:      VkCommandPool
+    
+    #if os(macOS) || os(iOS)
     public let metalLayer:       CAMetalLayer
-
+    #endif
     // MARK: Nodes
 
     /// The slots composited each frame, in array order (later = on top).
@@ -199,14 +201,14 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// Nodes whose image currently sits in SHADER_READ_ONLY_OPTIMAL.
     /// Internal (not private): the Skia update lives in its own file
     /// (VulkanRenderEngine+Skia.swift) and publishes through this too.
-    var readable: Set<Int> = []
+    public var readable: Set<Int> = []
     /// Nodes we've already logged a draw failure for — ThorVG's Canvas
     /// legitimately (and permanently) returns InsufficientCondition from a
     /// canvas nothing was ever painted into (e.g. a container widget whose
     /// on_canvas only holds children), so this is expected steady-state for
     /// some nodes, not a transient error worth repeating every frame.
     /// Internal for the same reason as `readable`.
-    var warnedFailedNodes: Set<Int> = []
+    public var warnedFailedNodes: Set<Int> = []
 
     // MARK: - Init
 
@@ -807,42 +809,46 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// Composite one slot, recursing into groups. A slot only draws once a
     /// frame update actually published its image (`readable`) — a node that
     /// never rendered has nothing safe to sample.
-    // private func recordComposite(
-    //     of node:  RenderNode,
-    //     cmd:      VkCommandBuffer,
-    //     viewport: VkViewport,
-    //     scissor:  VkRect2D
-    // ) {
-    //     let imageView: VkImageView
-    //     switch node.context {
-    //     case .thor(let thorShaderNode):
-    //         imageView = thorShaderNode.imageView
-    //     case .skia(let skiaShaderNode):
-    //         imageView = skiaShaderNode.imageView
-    //     case .shader(let oGLShaderNode):
-    //         imageView = oGLShaderNode.imageView
-    //     case .pixel_buffer(let pixelBufferShaderNode):
-    //         imageView = pixelBufferShaderNode.imageView
-    //     case .group(let groupNode):
-    //         for child in groupNode.nodes {
-    //             recordComposite(of: child, cmd: cmd, viewport: viewport, scissor: scissor)
-    //         }
-    //         return
-    //     case .texture_group:
-    //         return
-    //     }
-    //     guard readable.contains(node.id),
-    //           let set = descriptorSet(id: node.id, imageView: imageView) else { return }
-    //     composite.record(
-    //         commandBuffer: cmd,
-    //         descriptorSet: set,
-    //         viewport:      viewport,
-    //         scissor:       scissor
-    //     )
-    // }
+    private func recordComposite(
+        of node:  RenderNode,
+        cmd:      VkCommandBuffer,
+        viewport: VkViewport,
+        scissor:  VkRect2D
+    ) {
+        // let imageView: VkImageView
+        // switch node.context {
+        // case .thor(let thorShaderNode):
+        //     imageView = thorShaderNode.imageView
+        // case .skia(let skiaShaderNode):
+        //     imageView = skiaShaderNode.imageView
+        // case .shader(let oGLShaderNode):
+        //     imageView = oGLShaderNode.imageView
+        // case .pixel_buffer(let pixelBufferShaderNode):
+        //     imageView = pixelBufferShaderNode.imageView
+        // case .group(let groupNode):
+        //     for child in groupNode.nodes {
+        //         recordComposite(of: child, cmd: cmd, viewport: viewport, scissor: scissor)
+        //     }
+        //     return
+        // case .texture_group:
+        //     return
+        // }
+        guard
+            let imageView = node.getImageView(),
+            readable.contains(node.id),
+            let set = descriptorSet(id: node.id, imageView: imageView)
+        else { return }
+        
+        composite.record(
+            commandBuffer: cmd,
+            descriptorSet: set,
+            viewport:      viewport,
+            scissor:       scissor
+        )
+    }
 
     // TODO resolved: keyed by the slot's stable Int id, never ObjectIdentifier.
-    private func descriptorSet(id: Int, imageView: VkImageView) -> VkDescriptorSet? {
+    public func descriptorSet(id: Int, imageView: VkImageView) -> VkDescriptorSet? {
         // let id = ObjectIdentifier(node).hashValue
         // ^ replaced — RenderNode.id is the one identity both sides share.
         if let set = nodeSets[id] { return set }
@@ -1654,7 +1660,7 @@ extension VulkanRenderEngine {
     }
 
     /// Record + submit a transient command buffer and block until done.
-    func oneTimeSubmit(_ body: (VkCommandBuffer) -> Void) {
+    public func oneTimeSubmit(_ body: (VkCommandBuffer) -> Void) {
         var cmd: VkCommandBuffer?
         var allocInfo = VkCommandBufferAllocateInfo()
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
@@ -1689,7 +1695,7 @@ extension VulkanRenderEngine {
 
 /// Layout-transition barrier (same shape as the one in VulkenRenderTest.swift,
 /// duplicated here because that one is file-private).
-private func engineImageBarrier(
+public func engineImageBarrier(
     _ cmd:     VkCommandBuffer,
     image:     VkImage,
     srcLayout: VkImageLayout,
