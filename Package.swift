@@ -3,7 +3,7 @@
 
 import PackageDescription
 
-let localDev = true
+let localDev = false
 
 func getPlatformTarget() -> PackageDescription.Platform {
 #if ANDROID_BUILD
@@ -22,6 +22,8 @@ func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
     if localDev {
         deps.append(.package(path: "../SulphurGeometry"))
+    } else {
+        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "init_upload"))
     }
     return deps
 }
