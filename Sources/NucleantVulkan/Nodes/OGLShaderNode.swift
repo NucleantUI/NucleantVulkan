@@ -7,7 +7,9 @@ import Observation
 
 
 @Observable
-public final class OGLShaderNode: VulkanRenderNode, @unchecked Sendable {
+public final class OGLShaderNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
+
+    public typealias Engine = VulkanRenderEngine<ContainerNode>
 
     // public struct TextureInput {
     // ^ promoted to an @Observable class: a struct copy freezes the
@@ -124,6 +126,63 @@ public final class OGLShaderNode: VulkanRenderNode, @unchecked Sendable {
             self.descriptorsNeedRebind = true
             self.dirty = true
             self.observeInputs()
+        }
+    }
+}
+
+
+extension OGLShaderNode {
+    /// The shader-only counterpart of the thor/skia update: no canvas draw —
+    /// the compute dispatch writes the whole image. Without an installed
+    /// pipeline the node has no content, so it stays unpublished (never
+    /// enters `readable`) instead of compositing garbage.
+    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+        guard slot.needsRender else { return }
+        guard let pipeline = computePipeline,
+              let layout   = computeLayout,
+              let ds       = computeDescriptorSet
+        else { return }
+
+        engineImageBarrier(
+            cmd,
+            image:     image,
+            srcLayout: currentLayout,
+            srcAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue) | VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT.rawValue),
+            srcStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dstLayout: VK_IMAGE_LAYOUT_GENERAL,
+            dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue) | VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT.rawValue),
+            dstStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+        )
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline)
+        var descSet: VkDescriptorSet? = ds
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descSet, 0, nil)
+        vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1)
+        engineImageBarrier(
+            cmd,
+            image:     image,
+            srcLayout: VK_IMAGE_LAYOUT_GENERAL,
+            srcAccess: VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT.rawValue),
+            srcStage:  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
+            dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+        )
+        currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        engine.readable.insert(slot.id)
+        // slot.needsRender deliberately not cleared — same steady-state as
+        // the thor/skia node updates until the canvas side drives updates
+        // through the Observation chain.
+    }
+
+    /// Free the image/view/memory this node owns. Registered `textureInputs`
+    /// are borrowed (their creator owns and frees them), so they are left
+    /// untouched here.
+    public func destroyResources(_ engine: Engine) {
+        vkDeviceWaitIdle(engine.device)
+        vkDestroyImageView(engine.device, imageView, nil)
+        vkDestroyImage(engine.device, image, nil)
+        if let memory {
+            vkFreeMemory(engine.device, memory, nil)
         }
     }
 }

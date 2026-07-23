@@ -24,6 +24,16 @@ public protocol VulkanRenderNode: AnyObject, Observable, Sendable {
     
     associatedtype ContainerNode: RenderContainerNode
     associatedtype Engine: VulkanRenderEngine<ContainerNode>
-    
+
     func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer)
+
+    /// Tear down the GPU resources this node owns — its image/view/memory
+    /// and any node-specific surfaces (a Skia Ganesh surface, etc.). The
+    /// engine binds a node's image but never frees it, so the node releases
+    /// what it holds here when it's dropped (resize, detach). Implementations
+    /// drain the device first: no in-flight frame may still reference the
+    /// image. The node owns image/view/memory; anything the node only
+    /// borrowed (an imported wgpu texture, the ThorVG canvas handed to
+    /// Python) stays the borrower's to release.
+    func destroyResources(_ engine: Engine)
 }
