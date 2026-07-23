@@ -168,6 +168,22 @@ func mainTargets() -> [Target] {
                 "CWgpu",
                 "VulkanCore",
                 "NucleantShader"
+            ],
+            linkerSettings: [
+                // Link the SAME wgpu-native dylib ThorVG.framework loads
+                // (@rpath/libwgpu_native.dylib, its rpath is this dir) so the
+                // whole process shares one wgpu runtime — WgpuContext's device
+                // and ThorVG's wg backend must be the same wgpu, or handles
+                // crossed between two static copies would corrupt/crash. The
+                // -rpath resolves the same install_name to the same file, so
+                // dyld loads it once. macOS only for now; other platforms add
+                // their own wgpu-native path when their CWgpu lands.
+                .unsafeFlags([
+                    "-L/Volumes/CodeSSD/dev_projects/sulphur_dev/thorvg-cython/wgpu-native-macos/lib",
+                    "-lwgpu_native",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/Volumes/CodeSSD/dev_projects/sulphur_dev/thorvg-cython/wgpu-native-macos/lib",
+                ], .when(platforms: [.macOS])),
             ]
         ),
         .testTarget(
