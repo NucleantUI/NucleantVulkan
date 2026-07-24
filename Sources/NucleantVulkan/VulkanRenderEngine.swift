@@ -777,15 +777,33 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
             vkCmdBeginRenderPass(cmd, &info, VK_SUBPASS_CONTENTS_INLINE)
         }
 
-        let viewport = VkViewport(
+        let fullViewport = VkViewport(
             x: 0, y: 0,
             width:  Float(extent.width),
             height: Float(extent.height),
             minDepth: 0, maxDepth: 1
         )
-        let scissor = VkRect2D(offset: VkOffset2D(x: 0, y: 0), extent: extent)
+        let fullScissor = VkRect2D(offset: VkOffset2D(x: 0, y: 0), extent: extent)
 
         for node in nodes {
+            // A slot with a composite rect draws into that sub-region of the
+            // swapchain (its widget frame); otherwise it fills the screen.
+            let viewport: VkViewport
+            let scissor: VkRect2D
+            if let r = node.compositeRect, r.z > 0, r.w > 0 {
+                viewport = VkViewport(
+                    x: Float(r.x), y: Float(r.y),
+                    width:  Float(r.z), height: Float(r.w),
+                    minDepth: 0, maxDepth: 1
+                )
+                scissor = VkRect2D(
+                    offset: VkOffset2D(x: Int32(r.x), y: Int32(r.y)),
+                    extent: VkExtent2D(width: UInt32(r.z), height: UInt32(r.w))
+                )
+            } else {
+                viewport = fullViewport
+                scissor  = fullScissor
+            }
             recordComposite(of: node, cmd: cmd, viewport: viewport, scissor: scissor)
         }
 

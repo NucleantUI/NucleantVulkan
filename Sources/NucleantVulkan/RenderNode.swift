@@ -19,8 +19,12 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     func observe<Node: VulkanRenderNode>(_ node: Node)
     
     var needsRender: Bool { get set }
-    
-    
+
+    /// Where this slot composites in the swapchain — (x, y, width, height) in
+    /// pixels. `nil` composites fullscreen (the legacy behaviour).
+    var compositeRect: SIMD4<Double>? { get }
+
+
     func update(engine: Engine, cmd: VkCommandBuffer)
 
     // recordComposite lives on the engine, not here: sampling a node's
@@ -35,7 +39,10 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
 }
 
 extension RenderContainerNode {
-    
+
+    /// Fullscreen by default; only slots carrying a widget frame override it.
+    public var compositeRect: SIMD4<Double>? { nil }
+
     public typealias Engine = VulkanRenderEngine<Self>
     /// Arm one observation over the node's render-affecting state. A
         /// registration fires exactly once, so `onChange` re-arms; `node` is
