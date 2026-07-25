@@ -127,6 +127,18 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         nodes.first { $0.id == id }
     }
 
+    /// Drop everything the engine caches against a slot id whose node image was
+    /// swapped *in place* (a resize) — the sampler descriptor set + its pool,
+    /// and the `readable` flag. The per-slot descriptor cache assumes a node's
+    /// imageView is stable for life; an in-place image swap breaks that, so the
+    /// next frame must rebuild the set from the new view, and the slot must not
+    /// be sampled until the resized node's next draw makes its new image
+    /// readable again. Unlike `remove`/`replace`, the node itself stays in the
+    /// composite list — this only clears cache, never the slot.
+    public func invalidateComposite(id: Int) {
+        releaseTracking(of: id)
+    }
+
     /// Everything the engine tracked against a slot id — descriptor set +
     /// its dedicated pool, readable state, warn-once marker. Shared by
     /// `remove(id:)` / `replace(id:with:)`; the next frame re-derives it
