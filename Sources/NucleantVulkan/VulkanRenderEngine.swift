@@ -121,6 +121,12 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         }
     }
 
+    /// The live slot for `id`, or nil — lets a canvas re-attach per-slot state
+    /// (its widget frame) after a `replace` installs a fresh slot.
+    public func node(withId id: Int) -> RenderNode? {
+        nodes.first { $0.id == id }
+    }
+
     /// Everything the engine tracked against a slot id — descriptor set +
     /// its dedicated pool, readable state, warn-once marker. Shared by
     /// `remove(id:)` / `replace(id:with:)`; the next frame re-derives it

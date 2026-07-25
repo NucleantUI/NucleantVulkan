@@ -31,8 +31,8 @@ public final class PixelBufferShaderNode<ContainerNode: RenderContainerNode>: Vu
     
     /// Size of `image` — the surface shaders and the composite see.
     /// This is `sourceWidth/Height × scale`.
-    public let width:  UInt32
-    public let height: UInt32
+    public var width:  UInt32
+    public var height: UInt32
     
     /// Content resolution the producer `write`s (e.g. 256×240 for a NES).
     /// With `scale` > 1 the upload path nearest-blits these pixels up
@@ -42,11 +42,11 @@ public final class PixelBufferShaderNode<ContainerNode: RenderContainerNode>: Vu
     public let sourceHeight: UInt32
     public let scale:        UInt32
     
-    public let image:     VkImage
-    public let imageView: VkImageView
+    public var image:     VkImage
+    public var imageView: VkImageView
     /// The allocation backing `image` — carried for whoever tears the
     /// node down, same contract as `ThorShaderNode.memory`.
-    public let memory:    VkDeviceMemory?
+    public var memory:    VkDeviceMemory?
     
     /// Intermediate upload target at source resolution — the blit source
     /// feeding `image`. Nil at scale 1, where staging copies straight

@@ -33,14 +33,14 @@ public final class OGLShaderNode<ContainerNode: RenderContainerNode>: VulkanRend
         }
     }
 
-    public let width:  UInt32
-    public let height: UInt32
+    public var width:  UInt32
+    public var height: UInt32
 
-    public let image:     VkImage
-    public let imageView: VkImageView
+    public var image:     VkImage
+    public var imageView: VkImageView
     /// The allocation backing `image` — carried for whoever tears the
     /// node down, same contract as `ThorShaderNode.memory`.
-    public let memory:    VkDeviceMemory?
+    public var memory:    VkDeviceMemory?
 
     public var computePipeline:      VkPipeline?
     public var computeLayout:        VkPipelineLayout?

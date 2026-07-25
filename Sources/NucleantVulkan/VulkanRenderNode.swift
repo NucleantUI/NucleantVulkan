@@ -12,10 +12,10 @@ public protocol VulkanRenderNode: AnyObject, Observable, Sendable {
     //   joined the protocol: CanvasShader installs a post pipeline through
     //   this protocol now, so it works on every node kind (thor, shader,
     //   pixel_buffer) instead of being hardwired to ThorShaderNode.
-    var width:                UInt32            { get }
-    var height:               UInt32            { get }
-    var image:                VkImage           { get }
-    var imageView:            VkImageView       { get }
+    var width:                UInt32            { get set }
+    var height:               UInt32            { get set }
+    var image:                VkImage           { get set }
+    var imageView:            VkImageView       { get set }
     var storageCapable:       Bool              { get }
     var computePipeline:      VkPipeline?       { get set }
     var computeLayout:        VkPipelineLayout? { get set }
