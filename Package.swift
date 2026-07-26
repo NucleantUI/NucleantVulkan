@@ -82,10 +82,24 @@ func vulkanTargets() -> [Target] {
             )
         )
     }
+    // wgpu-native (v29.0.1.1), built by scripts/build_wgpu.py from NucleantUI's
+    // fork. Two forms because iOS links frameworks, not bare dylibs:
+    //   • macOS — the library xcframework: bare libwgpu_native.dylib
+    //     (@rpath/libwgpu_native.dylib), module `CWgpu`.
+    //   • iOS — the framework xcframework: wgpu_native.framework
+    //     (@rpath/wgpu_native.framework/wgpu_native), module `wgpu_native` —
+    //     the same reference ThorVG's iOS framework links, so the process
+    //     shares one embedded copy.
     targets.append(
-        .systemLibrary(
+        .binaryTarget(
             name: "CWgpu",
-            path: "Sources/CWgpu"
+            path: "Dependencies/wgpu_native.xcframework"
+        )
+    )
+    targets.append(
+        .binaryTarget(
+            name: "CWgpuFW",
+            path: "Dependencies/wgpu_native_framework.xcframework"
         )
     )
     targets.append(contentsOf: [
@@ -167,25 +181,14 @@ func mainTargets() -> [Target] {
         .target(
             name: "NucleantVulkan",
             dependencies: [
-                "CWgpu",
+                // macOS links the bare dylib (module CWgpu); iOS links the
+                // framework (module wgpu_native) — see the binary targets above.
+                // WgpuContext / VulkanRenderEngine import the right one per
+                // platform. SPM links + embeds whichever applies.
+                .byName(name: "CWgpu",   condition: .when(platforms: [.macOS])),
+                .byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])),
                 "VulkanCore",
                 "NucleantShader"
-            ],
-            linkerSettings: [
-                // Link the SAME wgpu-native dylib ThorVG.framework loads
-                // (@rpath/libwgpu_native.dylib, its rpath is this dir) so the
-                // whole process shares one wgpu runtime — WgpuContext's device
-                // and ThorVG's wg backend must be the same wgpu, or handles
-                // crossed between two static copies would corrupt/crash. The
-                // -rpath resolves the same install_name to the same file, so
-                // dyld loads it once. macOS only for now; other platforms add
-                // their own wgpu-native path when their CWgpu lands.
-                .unsafeFlags([
-                    "-L/Volumes/CodeSSD/dev_projects/sulphur_dev/thorvg-cython/wgpu-native-macos/lib",
-                    "-lwgpu_native",
-                    "-Xlinker", "-rpath",
-                    "-Xlinker", "/Volumes/CodeSSD/dev_projects/sulphur_dev/thorvg-cython/wgpu-native-macos/lib",
-                ], .when(platforms: [.macOS])),
             ]
         ),
         .testTarget(
@@ -223,7 +226,10 @@ func getProducts() -> [Product] {
 let package = Package(
     name: "NucleantVulkan",
     platforms: [
-        .iOS(.v15),
+        // iOS 17 (not 15): the render nodes use the Observation framework
+        // (@Observable / withObservationTracking), whose floor is iOS 17 /
+        // macOS 14 — so this is the exact parallel of the macOS(.v14) minimum.
+        .iOS(.v17),
         .macOS(.v14)
     ],
     products: getProducts(),

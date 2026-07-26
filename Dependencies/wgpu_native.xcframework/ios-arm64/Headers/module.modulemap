@@ -1,0 +1,6 @@
+// wgpu-native C API, exposed to Swift as `CWgpu` (module name kept so
+// `import CWgpu` in VulkanRenderEngine/WgpuContext is unchanged).
+module CWgpu {
+    header "wgpu.h"
+    export *
+}
