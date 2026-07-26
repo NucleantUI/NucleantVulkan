@@ -1,0 +1,4 @@
+framework module wgpu_native {
+    header "wgpu.h"
+    export *
+}

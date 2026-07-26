@@ -19,10 +19,15 @@
 // MARK: - Node type
 import VulkanCore
 import CVulkan
+// wgpu-native C API: bare-dylib module on macOS, framework module on iOS.
+#if os(iOS)
+import wgpu_native
+#else
 import CWgpu
+#endif
 import NucleantShader
 import CVulkan
-#if os(macOS)
+#if os(macOS) || os(iOS)
 import QuartzCore
 #endif
 

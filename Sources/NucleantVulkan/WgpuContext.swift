@@ -22,7 +22,12 @@
 //  without importing CWgpu itself.
 //
 import Foundation
+// wgpu-native C API: bare-dylib module on macOS, framework module on iOS.
+#if os(iOS)
+import wgpu_native
+#else
 import CWgpu
+#endif
 #if canImport(Metal)
 import Metal
 #endif
