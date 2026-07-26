@@ -1,0 +1,4 @@
+module CShaderc {
+    umbrella header "shim.h"
+    export *
+}
