@@ -4,7 +4,7 @@
 import Foundation
 import PackageDescription
 
-let localDev = false
+let localDev = true
 
 func getPlatformTarget() -> PackageDescription.Platform {
     // Package.swift is always compiled and run by the *host* toolchain, even
@@ -121,15 +121,36 @@ func vulkanTargets() -> [Target] {
                 ]
             )
         )
-        // wgpu-native isn't packaged by any distro, so there's no apt
-        // provider to hint here: run scripts/build_wgpu.py first — on Linux
-        // it builds wgpu-native and installs a matching wgpu-native.pc so
-        // pkg-config can find it.
+        // wgpu-native isn't packaged by any distro, so unlike
+        // CVulkan/CShaderc/CSPIRVCross above there's no system version to
+        // resolve against — it's vendored instead, the same way the
+        // macOS/iOS xcframework below is: run scripts/build_wgpu.py
+        // --prefix Dependencies/linux first (builds wgpu-native, copies
+        // libwgpu_native.so into Dependencies/linux/lib, and — separately —
+        // wgpu.h/webgpu.h are vendored into this target's own include/, the
+        // same way CThorVG vendors thorvg_capi.h: cSettings/header search
+        // paths are private to the target that declares them and don't
+        // propagate to importers, so an external -I here wouldn't be seen
+        // by code doing `import CWgpu` — only publicHeadersPath is). See
+        // Dependencies/linux/README.md.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let linuxLibDir = packageRoot.appendingPathComponent("Dependencies/linux/lib").path
         targets.append(
-            .systemLibrary(
+            .target(
                 name: "CWgpu",
                 path: "Sources/CWgpuLinux",
-                pkgConfig: "wgpu-native"
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("wgpu_native"),
+                    .unsafeFlags([
+                        "-L\(linuxLibDir)",
+                        "-Xlinker", "-rpath", "-Xlinker", linuxLibDir,
+                    ]),
+                ]
             )
         )
     } else {

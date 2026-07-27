@@ -22,9 +22,17 @@ i guess thats it for this lib..
 `Package.swift` now auto-detects Linux (`#if os(Linux)`, no build flags
 needed — the old `-DLINUX_BUILD` scheme was dead code, since `-Xswiftc`
 never reaches Package.swift's own compilation). `CVulkan`/`CShaderc`/
-`CSPIRVCross`/`CWgpu` all resolve and compile on Linux via pkg-config.
-Verified end to end except for `SulphurGeometry` (separate repo, blocks the
-final link with `import simd` — Apple-only, not fixed here).
+`CSPIRVCross` resolve real distro packages via pkg-config on Linux.
+`CWgpu` (no distro package) is vendored into `Dependencies/linux/` and
+linked directly instead — the earlier version of this note said "resolve
+via pkg-config" for `CWgpu` too and called this "done" without mentioning
+that meant a mandatory unversioned manual build+install step outside the
+repo (`sudo python3 scripts/build_wgpu.py`) with nothing checked in; that
+overstated it. Verified end to end (clean shell, no `PKG_CONFIG_PATH`
+needed for `CWgpu` specifically) except for `SulphurGeometry` (separate
+repo, blocks the final link with `import simd` — Apple-only, not fixed
+here — though that import turned out to be dead weight too, see
+`NucleantThorVG/plans/linux-webgpu.md`).
 
 ## Pre-build commands (Linux, one-time per machine)
 
@@ -36,13 +44,10 @@ sudo apt-get update && sudo apt-get -y install \
   libshaderc-dev libspirv-cross-c-shared-dev \
   libclang-dev
 
-# wgpu-native has no distro package: build + install it once.
-# Installs libwgpu_native.so + headers + wgpu-native.pc under /usr/local
-# (sudo needed for that prefix) so pkg-config finds it automatically.
-sudo python3 scripts/build_wgpu.py
-# Or, without sudo, install under your home dir and point pkg-config at it:
-#   python3 scripts/build_wgpu.py --prefix ~/.local
-#   export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+# wgpu-native has no distro package: build it once and vendor it into the
+# repo (Dependencies/linux/) — CWgpu links that directly, no PKG_CONFIG_PATH
+# needed afterwards.
+python3 scripts/build_wgpu.py --prefix Dependencies/linux
 
 # Then just:
 swift build
