@@ -285,6 +285,14 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         if availableDeviceExts.contains("VK_EXT_metal_objects") {
             deviceExtensions.append("VK_EXT_metal_objects")
         }
+        // Linux ThorVG zero-copy: import wgpu-native's exported memory fd
+        // (VK_KHR_external_memory_fd) as a VkImage on *this* device — the
+        // Linux/Vulkan mirror of VK_EXT_metal_objects above. Both device
+        // extensions are the cross-platform half of VK_KHR_external_memory,
+        // already core since Vulkan 1.1.
+        if availableDeviceExts.contains("VK_KHR_external_memory_fd") {
+            deviceExtensions.append("VK_KHR_external_memory_fd")
+        }
         var createdDevice: VkDevice?
         var priority: Float = 1.0
         let devResult: VkResult = withUnsafePointer(to: &priority) { priorityPtr in
@@ -414,6 +422,96 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
                 height: UInt32(max(drawable.height, 0))
             )
         })
+    }
+    #endif
+
+    #if os(Linux)
+    /// Linux entry point: builds the VkInstance (with the Wayland surface
+    /// extensions) and the VkSurfaceKHR from raw `wl_display*`/`wl_surface*`
+    /// handles — unlike Apple, Linux lets us hand the loader a native
+    /// surface directly via `VK_KHR_wayland_surface`, no compositor-specific
+    /// struct trickery needed (the struct's fields are plain opaque C
+    /// pointers, so it imports into Swift cleanly). Delegates to the shared
+    /// init above for everything past that.
+    public convenience init(waylandDisplay: OpaquePointer?, waylandSurface: OpaquePointer?, getExtent: @escaping () -> VkExtent2D) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_KHR_wayland_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        var createdSurface: VkSurfaceKHR?
+        var surfaceInfo = VkWaylandSurfaceCreateInfoKHR()
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR
+        surfaceInfo.display = waylandDisplay
+        surfaceInfo.surface = waylandSurface
+        let surfResult = vkCreateWaylandSurfaceKHR(instance, &surfaceInfo, nil, &createdSurface)
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: getExtent)
+    }
+
+    /// X11 entry point: same shape as the Wayland one above, `VK_KHR_xcb_surface`
+    /// instead of `VK_KHR_wayland_surface` — for sessions where the compositor
+    /// is a plain X11/XCB window manager (e.g. Cinnamon-on-Xorg) rather than a
+    /// Wayland one, so the window is a normal WM-managed top-level rather than
+    /// requiring a Wayland session to exist at all.
+    public convenience init(xcbConnection: OpaquePointer?, xcbWindow: xcb_window_t, getExtent: @escaping () -> VkExtent2D) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_KHR_xcb_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        var createdSurface: VkSurfaceKHR?
+        var surfaceInfo = VkXcbSurfaceCreateInfoKHR()
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR
+        surfaceInfo.connection = xcbConnection
+        surfaceInfo.window = xcbWindow
+        let surfResult = vkCreateXcbSurfaceKHR(instance, &surfaceInfo, nil, &createdSurface)
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: getExtent)
     }
     #endif
 

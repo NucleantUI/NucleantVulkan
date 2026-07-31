@@ -70,13 +70,23 @@ public final class WgpuContext: @unchecked Sendable {
         public let width:  Int
         public let height: Int
         public let storageCapable: Bool
+        #if !(os(macOS) || os(iOS))
+        /// POSIX fd for this target's backing memory
+        /// (`VK_KHR_external_memory_fd`), minted alongside the texture itself
+        /// — Vulkan has no way to export memory from an already-created
+        /// texture, so the fd is captured at creation time in `makeTarget`.
+        /// Ownership passes to whichever `VkImportMemoryFdInfoKHR` import
+        /// consumes it (the spec-mandated contract); nil if export failed.
+        fileprivate let exportedFd: Int32?
+        #endif
 
         fileprivate init(
             context: WgpuContext,
             texture: WGPUTexture,
             width: Int,
             height: Int,
-            storageCapable: Bool
+            storageCapable: Bool,
+            exportedFd: Int32? = nil
         ) {
             self.context        = context
             self.texture        = texture
@@ -84,6 +94,9 @@ public final class WgpuContext: @unchecked Sendable {
             self.width          = width
             self.height         = height
             self.storageCapable = storageCapable
+            #if !(os(macOS) || os(iOS))
+            self.exportedFd     = exportedFd
+            #endif
         }
 
         #if os(macOS) || os(iOS)
@@ -92,6 +105,15 @@ public final class WgpuContext: @unchecked Sendable {
         /// VK_EXT_metal_objects. Metal-only.
         public func nativeMetalTexture() -> UnsafeMutableRawPointer? {
             wgpuTextureGetNativeMetalTexture(texture)
+        }
+        #else
+        /// The POSIX fd for this target's backing memory, for importing as a
+        /// VkImage via `VkImportMemoryFdInfoKHR` (`VK_KHR_external_memory_fd`)
+        /// — real GPU-to-GPU sharing between wgpu-native's own VkDevice and
+        /// the caller's, on the same physical GPU. `nil` if the driver lacks
+        /// the extension or export failed at creation time.
+        public func nativeVulkanExportedFd() -> Int32? {
+            exportedFd
         }
         #endif
 
@@ -201,9 +223,11 @@ public final class WgpuContext: @unchecked Sendable {
             | WGPUTextureUsage_TextureBinding
             | WGPUTextureUsage_CopySrc
             | WGPUTextureUsage_CopyDst
+        #if os(macOS) || os(iOS)
         if canvasStorageCapable {
             descriptor.usage |= WGPUTextureUsage_StorageBinding
         }
+        #endif
         descriptor.dimension = WGPUTextureDimension_2D
         descriptor.size = WGPUExtent3D(
             width: UInt32(width),
@@ -214,6 +238,7 @@ public final class WgpuContext: @unchecked Sendable {
         descriptor.mipLevelCount = 1
         descriptor.sampleCount = 1
 
+        #if os(macOS) || os(iOS)
         guard let texture = wgpuDeviceCreateTexture(device, &descriptor) else {
             print("WgpuContext: wgpuDeviceCreateTexture failed")
             return nil
@@ -225,6 +250,26 @@ public final class WgpuContext: @unchecked Sendable {
             height:         height,
             storageCapable: canvasStorageCapable
         )
+        #else
+        // No StorageBinding here (see the field above the Apple-only branch):
+        // the export path's hal-level usage mapping only covers the plain
+        // color-attachment/sampled/copy case a ThorVG render target needs, not
+        // storage — canvas post-shaders on ThorVG canvases aren't supported
+        // through this path yet.
+        var exportedFd: Int32 = -1
+        guard let texture = wgpuDeviceCreateTextureWithExportedFd(device, &descriptor, &exportedFd) else {
+            print("WgpuContext: wgpuDeviceCreateTextureWithExportedFd failed — driver may lack VK_KHR_external_memory_fd")
+            return nil
+        }
+        return Target(
+            context:        self,
+            texture:        texture,
+            width:          width,
+            height:         height,
+            storageCapable: false,
+            exportedFd:     exportedFd
+        )
+        #endif
     }
 
     /// Blocks until every command previously submitted to this queue has

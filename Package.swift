@@ -33,7 +33,7 @@ func getDependencies() -> [Package.Dependency] {
     if localDev {
         deps.append(.package(path: "../SulphurGeometry"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "init_upload"))
+        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "master"))
     }
     return deps
 }

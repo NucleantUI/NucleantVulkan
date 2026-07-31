@@ -1522,6 +1522,26 @@ extern "C"
      */
     void *wgpuTextureGetNativeMetalTexture(WGPUTexture texture);
 
+    /**
+     * Linux/Unix counterpart of wgpuTextureGetNativeMetalTexture: Vulkan has
+     * no way to expose a native handle from an *already-created* texture
+     * (export capability must be requested at allocation time), so this
+     * creates the texture itself. Returns a usable WGPUTexture and, via
+     * out_fd, a POSIX file descriptor for its backing memory
+     * (VK_KHR_external_memory_fd) that a *different* VkDevice on the same
+     * physical GPU can import via VkImportMemoryFdInfoKHR for real zero-copy
+     * GPU-to-GPU sharing.
+     *
+     * The caller owns the returned fd: pass it to exactly one
+     * VkImportMemoryFdInfoKHR import (which takes ownership of it per the
+     * Vulkan spec) or close it yourself.
+     *
+     * Returns NULL (and leaves *out_fd untouched) if the active backend is
+     * not Vulkan, the driver lacks VK_KHR_external_memory_fd, or creation
+     * fails.
+     */
+    WGPUTexture wgpuDeviceCreateTextureWithExportedFd(WGPUDevice device, WGPUTextureDescriptor const * descriptor, int32_t * out_fd);
+
     void wgpuRenderPassEncoderMultiDrawIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
     void wgpuRenderPassEncoderMultiDrawIndexedIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
 
