@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
-"""Build wgpu-native for Apple platforms and package it as an XCFramework.
+"""Build wgpu-native and install it for the host platform.
 
-Produces Dependencies/wgpu_native.xcframework (the `CWgpu` binary target
-referenced by Package.swift) with three slices:
+  * macOS/iOS -> packages Dependencies/macos/wgpu_native.xcframework (the
+    `CWgpu` binary target) and wgpu_native_framework.xcframework (`CWgpuFW`,
+    for iOS), with three slices:
 
-  * macos-arm64_x86_64          (aarch64-apple-darwin + x86_64-apple-darwin)
-  * ios-arm64                   (aarch64-apple-ios)
-  * ios-arm64_x86_64-simulator  (aarch64-apple-ios-sim + x86_64-apple-ios)
+      * macos-arm64_x86_64          (aarch64-apple-darwin + x86_64-apple-darwin)
+      * ios-arm64                   (aarch64-apple-ios)
+      * ios-arm64_x86_64-simulator  (aarch64-apple-ios-sim + x86_64-apple-ios)
 
-Each slice wraps the **dynamic** libwgpu_native.dylib (install name
-@rpath/libwgpu_native.dylib — wgpu-native's default). Shipping it dynamic,
-under that exact name, keeps the whole process on ONE wgpu runtime: ThorVG's
-framework already loads `@rpath/libwgpu_native.dylib`, so it resolves to the
-same embedded copy the engine links here — a static slice would give each a
-private copy and crossed handles would corrupt/crash.
+    Each slice wraps the **dynamic** libwgpu_native.dylib (install name
+    @rpath/libwgpu_native.dylib — wgpu-native's default). Shipping it
+    dynamic, under that exact name, keeps the whole process on ONE wgpu
+    runtime: ThorVG's framework already loads
+    `@rpath/libwgpu_native.dylib`, so it resolves to the same embedded copy
+    the engine links here — a static slice would give each a private copy
+    and crossed handles would corrupt/crash.
+
+  * Linux -> builds libwgpu_native.so for the host triple and installs it
+    (plus headers and a generated wgpu-native.pc) under --prefix (default
+    /usr/local), so the `CWgpu` systemLibrary target in Package.swift finds
+    it via `pkg-config wgpu-native` — the same discovery mechanism
+    CVulkan/CShaderc/CSPIRVCross use for their apt-packaged Linux
+    dependencies. There's no distro package for wgpu-native, so this
+    build+install step stands in for `apt install` for it. See
+    Dependencies/linux/README.md.
 
 The `webgpu`-native-specific Metal accessors the engine relies on
 (wgpuTextureGetNativeMetalTexture / wgpuDeviceGetNativeMetalDevice /
@@ -28,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -244,28 +256,85 @@ def create_ios_framework_xcframework(ios_dylib: Path, iossim_dylib: Path,
     log(f"wgpu_native_framework.xcframework installed -> {out}")
 
 
-# --- Entry point -----------------------------------------------------------
+# --- Linux -------------------------------------------------------------
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ref", default=WGPU_REF, help="git tag/branch to build")
-    parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
-    parser.add_argument("--clean", action="store_true",
-                        help="wipe the work directory before building")
-    args = parser.parse_args()
+LINUX_SO = "libwgpu_native.so"
 
-    if sys.platform != "darwin":
-        sys.exit("error: build_wgpu.py targets Apple platforms; run on macOS")
+def cargo_build_host(src: Path) -> Path:
+    """Release-build wgpu-native for the host triple; return the built .so."""
+    require("cargo")
+    env = dict(os.environ)
+    cargo_bin = Path.home() / ".cargo" / "bin"
+    env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
+    run(["cargo", "build", "--release"], cwd=src, env=env)
+    so = src / "target" / "release" / LINUX_SO
+    if not so.is_file():
+        sys.exit(f"error: expected shared object not produced: {so}")
+    return so
 
-    work_dir: Path = args.work_dir.resolve()
-    if args.clean and work_dir.exists():
-        log(f"cleaning {work_dir}")
-        shutil.rmtree(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
 
+def write_pkgconfig(prefix: Path, version: str) -> Path:
+    """Emit prefix/lib/pkgconfig/wgpu-native.pc so `pkgConfig: "wgpu-native"`
+    in Package.swift's CWgpu systemLibrary target can find the library —
+    same discovery path as the apt-packaged shaderc.pc / spirv-cross-c-shared.pc."""
+    pc_dir = prefix / "lib" / "pkgconfig"
+    pc_dir.mkdir(parents=True, exist_ok=True)
+    pc_file = pc_dir / "wgpu-native.pc"
+    pc_file.write_text(
+        f"prefix={prefix}\n"
+        "exec_prefix=${prefix}\n"
+        "libdir=${prefix}/lib\n"
+        "includedir=${prefix}/include\n"
+        "\n"
+        "Name: wgpu-native\n"
+        "Description: wgpu-native (WebGPU implementation in Rust)\n"
+        f"Version: {version}\n"
+        "\n"
+        "Libs: -L${libdir} -lwgpu_native\n"
+        "Cflags: -I${includedir}\n"
+    )
+    return pc_file
+
+
+def install_linux(so: Path, src: Path, prefix: Path, version: str) -> None:
+    lib_dir = prefix / "lib"
+    include_dir = prefix / "include"
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    include_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        shutil.copy2(so, lib_dir / LINUX_SO)
+        # Flat layout matching the macOS/iOS xcframework headers: wgpu.h
+        # #includes "webgpu.h" from the same directory.
+        shutil.copy2(src / "ffi" / "wgpu.h", include_dir / "wgpu.h")
+        shutil.copy2(src / "ffi" / "webgpu-headers" / "webgpu.h", include_dir / "webgpu.h")
+        write_pkgconfig(prefix, version)
+    except PermissionError:
+        sys.exit(
+            f"error: no permission to write under {prefix}\n"
+            "  Either re-run with sudo, or pass --prefix to install somewhere "
+            "writable (e.g. --prefix ~/.local) and export PKG_CONFIG_PATH to "
+            "include <prefix>/lib/pkgconfig so pkg-config can find it."
+        )
+
+    log(f"wgpu-native installed -> {lib_dir / LINUX_SO}")
+    log(f"headers installed -> {include_dir}")
+    log(f"pkg-config file installed -> {lib_dir / 'pkgconfig' / 'wgpu-native.pc'}")
+
+
+def build_linux(work_dir: Path, ref: str, prefix: Path) -> None:
     src = work_dir / "wgpu-native"
-    sync_repo(WGPU_REPO, args.ref, src)
+    sync_repo(WGPU_REPO, ref, src)
+    so = cargo_build_host(src)
+    version = ref.lstrip("v")
+    install_linux(so, src, prefix, version)
+
+
+# --- macOS/iOS -----------------------------------------------------------
+
+def build_apple(work_dir: Path, ref: str) -> None:
+    src = work_dir / "wgpu-native"
+    sync_repo(WGPU_REPO, ref, src)
     ensure_targets(src)
 
     # Build every triple once, then fuse into per-platform slices.
@@ -278,13 +347,42 @@ def main() -> int:
         slice_libs[name] = fused
 
     headers = assemble_headers(src, stage / "Headers")
-    create_xcframework(slice_libs, headers, DEPENDENCIES_DIR / "wgpu_native.xcframework")
+    macos_dir = DEPENDENCIES_DIR / "macos"
+    create_xcframework(slice_libs, headers, macos_dir / "wgpu_native.xcframework")
 
     # iOS also gets a framework-style xcframework (iOS links frameworks, not
     # bare dylibs); macOS keeps using the library one above.
     create_ios_framework_xcframework(
         slice_libs["ios"], slice_libs["iossim"], src,
-        DEPENDENCIES_DIR / "wgpu_native_framework.xcframework")
+        macos_dir / "wgpu_native_framework.xcframework")
+
+
+# --- Entry point -----------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--ref", default=WGPU_REF, help="git tag/branch to build")
+    parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
+    parser.add_argument("--prefix", type=Path, default=Path("/usr/local"),
+                        help="Linux only: install prefix (default: /usr/local)")
+    parser.add_argument("--clean", action="store_true",
+                        help="wipe the work directory before building")
+    args = parser.parse_args()
+
+    work_dir: Path = args.work_dir.resolve()
+    if args.clean and work_dir.exists():
+        log(f"cleaning {work_dir}")
+        shutil.rmtree(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    system = platform.system()
+    if system == "Darwin":
+        build_apple(work_dir, args.ref)
+    elif system == "Linux":
+        build_linux(work_dir, args.ref, args.prefix.resolve())
+    else:
+        sys.exit(f"error: unsupported platform '{system}' (need Darwin or Linux)")
 
     log("done")
     return 0

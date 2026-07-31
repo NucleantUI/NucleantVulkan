@@ -1,0 +1,4 @@
+module CSPIRVCross {
+    umbrella header "shim.h"
+    export *
+}

@@ -1,0 +1,4 @@
+module CWgpu {
+    umbrella header "shim.h"
+    export *
+}

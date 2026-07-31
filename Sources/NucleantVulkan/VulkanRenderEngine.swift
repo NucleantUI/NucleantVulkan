@@ -74,10 +74,17 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     public let graphicsQueue:    VkQueue
     public let queueFamilyIndex: UInt32
     public let commandPool:      VkCommandPool
-    
-    #if os(macOS) || os(iOS)
-    public let metalLayer:       CAMetalLayer
-    #endif
+
+    /// Live drawable size, in pixels — every window system has a different
+    /// way to ask "how big is my surface right now" (a CAMetalLayer reports
+    /// its own `drawableSize`; a raw Wayland surface has no such query at
+    /// all, since resize is delivered via compositor configure events the
+    /// windowing layer tracks) — so whoever creates the surface hands in the
+    /// one closure that answers it. Same shared, platform-agnostic role on
+    /// every platform: nothing else in the engine after init cares how the
+    /// window was created.
+    private let getExtent: () -> VkExtent2D
+
     // MARK: Nodes
 
     /// The slots composited each frame, in array order (later = on top).
@@ -216,73 +223,26 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
 
     // MARK: - Init
 
-    public init(metalLayer: CAMetalLayer) throws {
-        self.metalLayer = metalLayer
-        self.imageCount = Self.maxFrames
-
-        // --- Instance with surface extensions -------------------------------
-        let availableInstanceExts = enumerateInstanceExtensions()
-        var instanceExtensions = ["VK_KHR_surface", "VK_EXT_metal_surface"]
-        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
-            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
-        }
-        var instanceFlags: VkInstanceCreateFlags = 0
-        if availableInstanceExts.contains("VK_KHR_portability_enumeration") {
-            instanceExtensions.append("VK_KHR_portability_enumeration")
-            instanceFlags = VkInstanceCreateFlags(0x00000001) // ENUMERATE_PORTABILITY_BIT_KHR
-        }
-
-        var createdInstance: VkInstance?
-        var appInfo = VkApplicationInfo()
-        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
-        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
-        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
-            withCStringArray(instanceExtensions) { extPtr, extCount in
-                var ci = VkInstanceCreateInfo()
-                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
-                ci.flags = instanceFlags
-                ci.pApplicationInfo = appPtr
-                ci.enabledExtensionCount = extCount
-                ci.ppEnabledExtensionNames = extPtr
-                return vkCreateInstance(&ci, nil, &createdInstance)
-            }
-        }
-        guard instResult == VK_SUCCESS, let instance = createdInstance else {
-            throw VulkanEngineError.instance(instResult.rawValue)
-        }
+    /// The shared, platform-agnostic designated init: everything from here
+    /// down is plain Vulkan — device pick, queue, command pool, descriptor
+    /// pool, render pass, sync objects, composite pipeline, first swapchain
+    /// attempt — identical on every platform. `instance`/`surface` arrive
+    /// already made: creating them is inherently platform-specific (Metal
+    /// surface via MoltenVK on Apple; Wayland/XCB surface elsewhere), so
+    /// that part is the caller's job — see `init(metalLayer:)` below for the
+    /// Apple entry point. `getExtent` is the one other unavoidable seam:
+    /// there's no portable "what size is my surface right now" query (a
+    /// CAMetalLayer reports `drawableSize`; a raw Wayland surface doesn't
+    /// self-report at all), so whoever made the surface answers it too.
+    public init(
+        instance: VkInstance,
+        surface: VkSurfaceKHR,
+        getExtent: @escaping () -> VkExtent2D
+    ) throws {
         self.instance = instance
-
-        // --- VkSurface from the CAMetalLayer ---------------------------------
-        // VkMetalSurfaceCreateInfoEXT doesn't import into Swift (its ObjC
-        // pLayer field makes the struct non-trivial under ARC), so lay the
-        // 32-byte struct out by hand: sType@0, pNext@8, flags@16, pLayer@24.
-        var createdSurface: VkSurfaceKHR?
-        let surfaceInfo = UnsafeMutableRawPointer.allocate(
-            byteCount: 32,
-            alignment: MemoryLayout<UInt>.alignment
-        )
-        defer { surfaceInfo.deallocate() }
-        surfaceInfo.initializeMemory(as: UInt8.self, repeating: 0, count: 32)
-        surfaceInfo.storeBytes(
-            of: VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT.rawValue,
-            toByteOffset: 0,
-            as: UInt32.self
-        )
-        surfaceInfo.storeBytes(
-            of: UInt(bitPattern: Unmanaged.passUnretained(metalLayer).toOpaque()),
-            toByteOffset: 24,
-            as: UInt.self
-        )
-        let surfResult = vkCreateMetalSurfaceEXT(
-            instance,
-            OpaquePointer(surfaceInfo),
-            nil,
-            &createdSurface
-        )
-        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
-            throw VulkanEngineError.surface(surfResult.rawValue)
-        }
         self.surface = surface
+        self.getExtent = getExtent
+        self.imageCount = Self.maxFrames
 
         // --- Physical device --------------------------------------------------
         var gpuCount: UInt32 = 0
@@ -324,6 +284,14 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         }
         if availableDeviceExts.contains("VK_EXT_metal_objects") {
             deviceExtensions.append("VK_EXT_metal_objects")
+        }
+        // Linux ThorVG zero-copy: import wgpu-native's exported memory fd
+        // (VK_KHR_external_memory_fd) as a VkImage on *this* device — the
+        // Linux/Vulkan mirror of VK_EXT_metal_objects above. Both device
+        // extensions are the cross-platform half of VK_KHR_external_memory,
+        // already core since Vulkan 1.1.
+        if availableDeviceExts.contains("VK_KHR_external_memory_fd") {
+            deviceExtensions.append("VK_KHR_external_memory_fd")
         }
         var createdDevice: VkDevice?
         var priority: Float = 1.0
@@ -379,6 +347,174 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         try? createSwapchain()
     }
 
+    #if os(macOS) || os(iOS)
+    /// Apple entry point: builds the VkInstance (with the Metal surface
+    /// extensions) and the VkSurfaceKHR from a CAMetalLayer itself, since
+    /// Apple only allows reaching Vulkan through MoltenVK/Metal in the first
+    /// place — there's no "hand me a native surface" option here the way
+    /// there is on Linux. Delegates to the shared init above for everything
+    /// past that.
+    public convenience init(metalLayer: CAMetalLayer) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_EXT_metal_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+        var instanceFlags: VkInstanceCreateFlags = 0
+        if availableInstanceExts.contains("VK_KHR_portability_enumeration") {
+            instanceExtensions.append("VK_KHR_portability_enumeration")
+            instanceFlags = VkInstanceCreateFlags(0x00000001) // ENUMERATE_PORTABILITY_BIT_KHR
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.flags = instanceFlags
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        // VkMetalSurfaceCreateInfoEXT doesn't import into Swift (its ObjC
+        // pLayer field makes the struct non-trivial under ARC), so lay the
+        // 32-byte struct out by hand: sType@0, pNext@8, flags@16, pLayer@24.
+        var createdSurface: VkSurfaceKHR?
+        let surfaceInfo = UnsafeMutableRawPointer.allocate(
+            byteCount: 32,
+            alignment: MemoryLayout<UInt>.alignment
+        )
+        defer { surfaceInfo.deallocate() }
+        surfaceInfo.initializeMemory(as: UInt8.self, repeating: 0, count: 32)
+        surfaceInfo.storeBytes(
+            of: VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT.rawValue,
+            toByteOffset: 0,
+            as: UInt32.self
+        )
+        surfaceInfo.storeBytes(
+            of: UInt(bitPattern: Unmanaged.passUnretained(metalLayer).toOpaque()),
+            toByteOffset: 24,
+            as: UInt.self
+        )
+        let surfResult = vkCreateMetalSurfaceEXT(
+            instance,
+            OpaquePointer(surfaceInfo),
+            nil,
+            &createdSurface
+        )
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: {
+            let drawable = metalLayer.drawableSize
+            return VkExtent2D(
+                width:  UInt32(max(drawable.width, 0)),
+                height: UInt32(max(drawable.height, 0))
+            )
+        })
+    }
+    #endif
+
+    #if os(Linux)
+    /// Linux entry point: builds the VkInstance (with the Wayland surface
+    /// extensions) and the VkSurfaceKHR from raw `wl_display*`/`wl_surface*`
+    /// handles — unlike Apple, Linux lets us hand the loader a native
+    /// surface directly via `VK_KHR_wayland_surface`, no compositor-specific
+    /// struct trickery needed (the struct's fields are plain opaque C
+    /// pointers, so it imports into Swift cleanly). Delegates to the shared
+    /// init above for everything past that.
+    public convenience init(waylandDisplay: OpaquePointer?, waylandSurface: OpaquePointer?, getExtent: @escaping () -> VkExtent2D) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_KHR_wayland_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        var createdSurface: VkSurfaceKHR?
+        var surfaceInfo = VkWaylandSurfaceCreateInfoKHR()
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR
+        surfaceInfo.display = waylandDisplay
+        surfaceInfo.surface = waylandSurface
+        let surfResult = vkCreateWaylandSurfaceKHR(instance, &surfaceInfo, nil, &createdSurface)
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: getExtent)
+    }
+
+    /// X11 entry point: same shape as the Wayland one above, `VK_KHR_xcb_surface`
+    /// instead of `VK_KHR_wayland_surface` — for sessions where the compositor
+    /// is a plain X11/XCB window manager (e.g. Cinnamon-on-Xorg) rather than a
+    /// Wayland one, so the window is a normal WM-managed top-level rather than
+    /// requiring a Wayland session to exist at all.
+    public convenience init(xcbConnection: OpaquePointer?, xcbWindow: xcb_window_t, getExtent: @escaping () -> VkExtent2D) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_KHR_xcb_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        var createdSurface: VkSurfaceKHR?
+        var surfaceInfo = VkXcbSurfaceCreateInfoKHR()
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR
+        surfaceInfo.connection = xcbConnection
+        surfaceInfo.window = xcbWindow
+        let surfResult = vkCreateXcbSurfaceKHR(instance, &surfaceInfo, nil, &createdSurface)
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: getExtent)
+    }
+    #endif
+
     deinit {
         vkDeviceWaitIdle(device)
         // Free every live slot's node resources before the device is torn
@@ -412,9 +548,13 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// piles up every call — this is the single busiest call site in the
     /// app, so it owns its own drain rather than depending on the caller.
     public func drawFrame(_ dt: Double = 0) {
+        #if os(macOS) || os(iOS)
         autoreleasepool {
             drawFrameUnpooled(dt)
         }
+        #else
+        drawFrameUnpooled(dt)
+        #endif
     }
 
     private func drawFrameUnpooled(_ dt: Double) {
@@ -1021,9 +1161,9 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     // MARK: - Swapchain
 
     private func ensureSwapchain() {
-        let drawable = metalLayer.drawableSize
-        let width  = UInt32(max(drawable.width, 0))
-        let height = UInt32(max(drawable.height, 0))
+        let drawable = getExtent()
+        let width  = drawable.width
+        let height = drawable.height
         if swapchain == nil {
             try? createSwapchain()
         } else if width > 0, height > 0, width != extent.width || height != extent.height {
@@ -1042,10 +1182,10 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
 
         var newExtent = caps.currentExtent
         if newExtent.width == UInt32.max {
-            let drawable = metalLayer.drawableSize
+            let drawable = getExtent()
             newExtent = VkExtent2D(
-                width:  UInt32(max(drawable.width, 1)),
-                height: UInt32(max(drawable.height, 1))
+                width:  max(drawable.width, 1),
+                height: max(drawable.height, 1)
             )
         }
         guard newExtent.width > 0, newExtent.height > 0 else {

@@ -1,0 +1,11 @@
+prefix=/home/lexmint/nucleant_dev/NucleantVulkan/Dependencies/linux
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: wgpu-native
+Description: wgpu-native (WebGPU implementation in Rust)
+Version: 29.0.1.1
+
+Libs: -L${libdir} -lwgpu_native
+Cflags: -I${includedir}

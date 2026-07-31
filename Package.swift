@@ -1,14 +1,24 @@
 // swift-tools-version: 6.2
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
+import Foundation
 import PackageDescription
 
-let localDev = false
+let localDev = true
 
 func getPlatformTarget() -> PackageDescription.Platform {
-#if ANDROID_BUILD
-    return .android
-#elseif LINUX_BUILD
+    // Package.swift is always compiled and run by the *host* toolchain, even
+    // when the target platform differs (e.g. cross-compiling to Android from
+    // a Linux or macOS host) — so `#if os(...)` alone can only ever tell us
+    // the host, not an explicit cross-compile target. Linux needs no such
+    // override: building natively on Linux, the host *is* the target, so
+    // `#if os(Linux)` is sufficient and `swift build` just works with no
+    // extra flags. Android has no such thing as "native"; it's always a
+    // cross-compile, so it stays an explicit opt-in via env var.
+    if ProcessInfo.processInfo.environment["ANDROID_BUILD"] != nil {
+        return .android
+    }
+#if os(Linux)
     return .linux
 #else
     return .macOS
@@ -23,7 +33,7 @@ func getDependencies() -> [Package.Dependency] {
     if localDev {
         deps.append(.package(path: "../SulphurGeometry"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "init_upload"))
+        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "master"))
     }
     return deps
 }
@@ -37,14 +47,16 @@ func vulkanTargets() -> [Target] {
     case let p where p == .linux:
         // System Vulkan loader via pkg-config.
         // WSI backends auto-detected from installed dev headers in CVulkanLinux/shim.h.
-        // Requires: apt install libvulkan-dev
+        // Requires: apt install libvulkan-dev (+ libwayland-dev/libxcb1-dev/
+        // libx11-dev for Wayland/XCB/Xlib surface support — see
+        // Dependencies/linux/README.md).
         targets.append(
             .systemLibrary(
                 name: "CVulkan",
                 path: "Sources/CVulkanLinux",
                 pkgConfig: "vulkan",
                 providers: [
-                    .apt(["libvulkan-dev"])
+                    .apt(["libvulkan-dev", "libwayland-dev", "libxcb1-dev", "libx11-dev"])
                 ]
             )
         )
@@ -61,7 +73,7 @@ func vulkanTargets() -> [Target] {
         targets.append(
             .binaryTarget(
                 name: "MoltenVK",
-                path: "Dependencies/MoltenVK.xcframework"
+                path: "Dependencies/macos/MoltenVK.xcframework"
             )
         )
         
@@ -82,67 +94,128 @@ func vulkanTargets() -> [Target] {
             )
         )
     }
-    // wgpu-native (v29.0.1.1), built by scripts/build_wgpu.py from NucleantUI's
-    // fork. Two forms because iOS links frameworks, not bare dylibs:
-    //   • macOS — the library xcframework: bare libwgpu_native.dylib
-    //     (@rpath/libwgpu_native.dylib), module `CWgpu`.
-    //   • iOS — the framework xcframework: wgpu_native.framework
-    //     (@rpath/wgpu_native.framework/wgpu_native), module `wgpu_native` —
-    //     the same reference ThorVG's iOS framework links, so the process
-    //     shares one embedded copy.
-    targets.append(
-        .binaryTarget(
-            name: "CWgpu",
-            path: "Dependencies/wgpu_native.xcframework"
+    if platformTarget == .linux {
+        // shaderc (GLSL -> SPIR-V) via system libshaderc-dev, discovered
+        // through its shaderc.pc pkg-config file — same shim-header pattern
+        // as CVulkanLinux above.
+        targets.append(
+            .systemLibrary(
+                name: "CShaderc",
+                path: "Sources/CShadercLinux",
+                pkgConfig: "shaderc",
+                providers: [
+                    .apt(["libshaderc-dev"])
+                ]
+            )
         )
-    )
-    targets.append(
-        .binaryTarget(
-            name: "CWgpuFW",
-            path: "Dependencies/wgpu_native_framework.xcframework"
+        // spirv-cross (SPIR-V -> MSL/HLSL/GLSL) via system
+        // libspirv-cross-c-shared-dev, discovered through its
+        // spirv-cross-c-shared.pc pkg-config file.
+        targets.append(
+            .systemLibrary(
+                name: "CSPIRVCross",
+                path: "Sources/CSPIRVCrossLinux",
+                pkgConfig: "spirv-cross-c-shared",
+                providers: [
+                    .apt(["libspirv-cross-c-shared-dev"])
+                ]
+            )
         )
-    )
-    targets.append(contentsOf: [
-        .binaryTarget(
-             name: "shaderc",
-             path: "Dependencies/shaderc.xcframework"
-         ),
-         
-         // spirv-cross xcframework (SPIR-V -> MSL/HLSL cross-compiler)
-         .binaryTarget(
-             name: "spirv-cross",
-             path: "Dependencies/spirv-cross.xcframework"
-         ),
-         // CShaderc - C wrapper for shaderc (GLSL -> SPIR-V compiler)
-         .target(
-             name: "CShaderc",
-             dependencies: ["shaderc"],
-             //path: "Dependencies/CShaderc",
-             sources: ["stub.c"],
-             publicHeadersPath: "include",
-             cSettings: [
-                 .headerSearchPath(".")
-             ],
-             linkerSettings: [
-                 .linkedLibrary("c++")
-             ]
-         ),
-         
-         // CSPIRVCross - C wrapper for spirv-cross (SPIR-V -> MSL/HLSL)
-         .target(
-             name: "CSPIRVCross",
-             dependencies: ["spirv-cross"],
-             //path: "Dependencies/CSPIRVCross",
-             sources: ["stub.c"],
-             publicHeadersPath: "include",
-             cSettings: [
-                 .headerSearchPath(".")
-             ],
-             linkerSettings: [
-                 .linkedLibrary("c++")
-             ]
-         ),
-    ])
+        // wgpu-native isn't packaged by any distro, so unlike
+        // CVulkan/CShaderc/CSPIRVCross above there's no system version to
+        // resolve against — it's vendored instead, the same way the
+        // macOS/iOS xcframework below is: run scripts/build_wgpu.py
+        // --prefix Dependencies/linux first (builds wgpu-native, copies
+        // libwgpu_native.so into Dependencies/linux/lib, and — separately —
+        // wgpu.h/webgpu.h are vendored into this target's own include/, the
+        // same way CThorVG vendors thorvg_capi.h: cSettings/header search
+        // paths are private to the target that declares them and don't
+        // propagate to importers, so an external -I here wouldn't be seen
+        // by code doing `import CWgpu` — only publicHeadersPath is). See
+        // Dependencies/linux/README.md.
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let linuxLibDir = packageRoot.appendingPathComponent("Dependencies/linux/lib").path
+        targets.append(
+            .target(
+                name: "CWgpu",
+                path: "Sources/CWgpuLinux",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("wgpu_native"),
+                    .unsafeFlags([
+                        "-L\(linuxLibDir)",
+                        "-Xlinker", "-rpath", "-Xlinker", linuxLibDir,
+                    ]),
+                ]
+            )
+        )
+    } else {
+        // wgpu-native (v29.0.1.1), built by scripts/build_wgpu.py from NucleantUI's
+        // fork. Two forms because iOS links frameworks, not bare dylibs:
+        //   • macOS — the library xcframework: bare libwgpu_native.dylib
+        //     (@rpath/libwgpu_native.dylib), module `CWgpu`.
+        //   • iOS — the framework xcframework: wgpu_native.framework
+        //     (@rpath/wgpu_native.framework/wgpu_native), module `wgpu_native` —
+        //     the same reference ThorVG's iOS framework links, so the process
+        //     shares one embedded copy.
+        targets.append(
+            .binaryTarget(
+                name: "CWgpu",
+                path: "Dependencies/macos/wgpu_native.xcframework"
+            )
+        )
+        targets.append(
+            .binaryTarget(
+                name: "CWgpuFW",
+                path: "Dependencies/macos/wgpu_native_framework.xcframework"
+            )
+        )
+        targets.append(contentsOf: [
+            .binaryTarget(
+                 name: "shaderc",
+                 path: "Dependencies/macos/shaderc.xcframework"
+             ),
+
+             // spirv-cross xcframework (SPIR-V -> MSL/HLSL cross-compiler)
+             .binaryTarget(
+                 name: "spirv-cross",
+                 path: "Dependencies/macos/spirv-cross.xcframework"
+             ),
+             // CShaderc - C wrapper for shaderc (GLSL -> SPIR-V compiler)
+             .target(
+                 name: "CShaderc",
+                 dependencies: ["shaderc"],
+                 //path: "Dependencies/CShaderc",
+                 sources: ["stub.c"],
+                 publicHeadersPath: "include",
+                 cSettings: [
+                     .headerSearchPath(".")
+                 ],
+                 linkerSettings: [
+                     .linkedLibrary("c++")
+                 ]
+             ),
+
+             // CSPIRVCross - C wrapper for spirv-cross (SPIR-V -> MSL/HLSL)
+             .target(
+                 name: "CSPIRVCross",
+                 dependencies: ["spirv-cross"],
+                 //path: "Dependencies/CSPIRVCross",
+                 sources: ["stub.c"],
+                 publicHeadersPath: "include",
+                 cSettings: [
+                     .headerSearchPath(".")
+                 ],
+                 linkerSettings: [
+                     .linkedLibrary("c++")
+                 ]
+             ),
+        ])
+    }
     return targets
 }
 
@@ -180,16 +253,26 @@ func mainTargets() -> [Target] {
         ),
         .target(
             name: "NucleantVulkan",
-            dependencies: [
-                // macOS links the bare dylib (module CWgpu); iOS links the
-                // framework (module wgpu_native) — see the binary targets above.
-                // WgpuContext / VulkanRenderEngine import the right one per
-                // platform. SPM links + embeds whichever applies.
-                .byName(name: "CWgpu",   condition: .when(platforms: [.macOS])),
-                .byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])),
-                "VulkanCore",
-                "NucleantShader"
-            ]
+            dependencies: {
+                // macOS/Linux link the bare dylib/.so (module CWgpu); iOS
+                // links the framework (module wgpu_native) — see the binary
+                // targets above. WgpuContext / VulkanRenderEngine import the
+                // right one per platform. SPM links + embeds whichever
+                // applies. `CWgpuFW` is only ever declared as a target in the
+                // Apple (non-Linux/Android) branch of vulkanTargets(), so the
+                // by-name reference to it must be left out entirely on
+                // Linux/Android — a `.when(platforms:)` condition only gates
+                // linking, not whether the referenced target has to exist.
+                var deps: [Target.Dependency] = [
+                    .byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux])),
+                    "VulkanCore",
+                    "NucleantShader"
+                ]
+                if platformTarget != .linux && platformTarget != .android {
+                    deps.append(.byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])))
+                }
+                return deps
+            }()
         ),
         .testTarget(
             name: "NucleantVulkanTests",
@@ -207,10 +290,19 @@ func getTargets() -> [Target] {
 }
 
 func getProducts() -> [Product] {
-    [
+    // CVulkan is a `.systemLibrary` target on Linux/Android; SwiftPM rejects
+    // a product that bundles a system-library target alongside another
+    // target ("system library product ... shouldn't have a type and contain
+    // only one target"), so there it's left out of NucleantVulkan's product —
+    // it's still reachable as an internal build dependency, just not
+    // re-exported as part of this product's public target list.
+    let vulkanTargets: [String] = platformTarget == .linux || platformTarget == .android
+        ? ["NucleantVulkan"]
+        : ["NucleantVulkan", "CVulkan"]
+    return [
         .library(
             name: "NucleantVulkan",
-            targets: ["NucleantVulkan", "CVulkan"]
+            targets: vulkanTargets
         ),
         .library(
             name: "VulkanCore",
