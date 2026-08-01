@@ -15,7 +15,14 @@ func getPlatformTarget() -> PackageDescription.Platform {
     // `#if os(Linux)` is sufficient and `swift build` just works with no
     // extra flags. Android has no such thing as "native"; it's always a
     // cross-compile, so it stays an explicit opt-in via env var.
-    if ProcessInfo.processInfo.environment["ANDROID_BUILD"] != nil {
+    //
+    // SWIFT_ANDROID_HOME is the signal, because it is what pyswiftkit-builder
+    // actually exports and what CPython, PySwiftKit and PyNucleantUI already
+    // test. ANDROID_BUILD stays accepted for a hand-driven `swift build`, but
+    // on its own it was never set by the wheel build — which made this whole
+    // branch dead code and silently routed Android builds to `.linux`.
+    let env = ProcessInfo.processInfo.environment
+    if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
         return .android
     }
 #if os(Linux)
@@ -23,6 +30,35 @@ func getPlatformTarget() -> PackageDescription.Platform {
 #else
     return .macOS
 #endif
+}
+
+/// Vendored Android artifacts for the ABI currently being built.
+///
+/// Android builds one architecture per `swift build`, so unlike Linux there is
+/// no single lib directory — the ABI comes from the environment
+/// (`SWIFT_ANDROID_ABI`, else derived from the target triple in
+/// `SWIFT_TRIPLE`). Nothing is probed for existence here: a missing directory
+/// has to fail at link time with a real message, not silently resolve to some
+/// other architecture's binaries.
+func androidABI() -> String {
+    let env = ProcessInfo.processInfo.environment
+    if let abi = env["SWIFT_ANDROID_ABI"], !abi.isEmpty {
+        return abi
+    }
+    let triple = env["SWIFT_TRIPLE"] ?? ""
+    switch triple.split(separator: "-").first.map(String.init) ?? "" {
+    case "aarch64": return "arm64-v8a"
+    case "x86_64":  return "x86_64"
+    case "armv7":   return "armeabi-v7a"
+    default:        return "arm64-v8a"
+    }
+}
+
+func androidLibDir() -> String {
+    let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    return packageRoot
+        .appendingPathComponent("Dependencies/android/\(androidABI())/lib")
+        .path
 }
 
 let platformTarget = getPlatformTarget()
@@ -94,7 +130,67 @@ func vulkanTargets() -> [Target] {
             )
         )
     }
-    if platformTarget == .linux {
+    if platformTarget == .android {
+        // Android has no system package manager to resolve these from and no
+        // xcframework support, so all three are vendored per-ABI under
+        // Dependencies/android/<abi>/lib — the same role Dependencies/linux
+        // plays on Linux. Header search paths are private to the declaring
+        // target and do not propagate to importers, so each C target keeps its
+        // own publicHeadersPath exactly as the Linux branch does.
+        let libDir = androidLibDir()
+
+        targets.append(
+            .target(
+                name: "CShaderc",
+                path: "Sources/CShadercAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("shaderc_shared"),
+                    .unsafeFlags(["-L\(libDir)"]),
+                ]
+            )
+        )
+        targets.append(
+            .target(
+                name: "CSPIRVCross",
+                path: "Sources/CSPIRVCrossAndroid",
+                // spirv_cross_c.h sits beside shim.h in include/ and is
+                // included unprefixed, matching the Linux shim's spelling.
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("spirv-cross-c-shared"),
+                    .unsafeFlags(["-L\(libDir)"]),
+                ]
+            )
+        )
+        // No -rpath: on Android the loader resolves DT_NEEDED out of the app's
+        // native library directory, which is where Gradle stages these .so
+        // files. An rpath baked at build time would point at a host path that
+        // does not exist on device.
+        targets.append(
+            .target(
+                name: "CWgpu",
+                path: "Sources/CWgpuLinux",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("wgpu_native"),
+                    .unsafeFlags(["-L\(libDir)"]),
+                ]
+            )
+        )
+    } else if platformTarget == .linux {
         // shaderc (GLSL -> SPIR-V) via system libshaderc-dev, discovered
         // through its shaderc.pc pkg-config file — same shim-header pattern
         // as CVulkanLinux above.
@@ -264,7 +360,10 @@ func mainTargets() -> [Target] {
                 // Linux/Android — a `.when(platforms:)` condition only gates
                 // linking, not whether the referenced target has to exist.
                 var deps: [Target.Dependency] = [
-                    .byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux])),
+                    // .android included: the Android branch of vulkanTargets()
+                    // declares its own CWgpu (vendored libwgpu_native.so),
+                    // and without it here the target exists but never links.
+                    .byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux, .android])),
                     "VulkanCore",
                     "NucleantShader"
                 ]

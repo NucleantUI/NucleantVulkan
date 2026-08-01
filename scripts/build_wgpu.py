@@ -330,6 +330,172 @@ def build_linux(work_dir: Path, ref: str, prefix: Path) -> None:
     install_linux(so, src, prefix, version)
 
 
+# --- Android ---------------------------------------------------------------
+#
+# Unlike Linux there is no system prefix and no pkg-config: the .so is vendored
+# per ABI under Dependencies/android/<abi>/lib, which is exactly where the
+# `CWgpu` target's -L points when Package.swift resolves to `.android`. Headers
+# are NOT installed here — CWgpu vendors wgpu.h/webgpu.h in its own include/
+# directory (publicHeadersPath), the same as on Linux.
+#
+# ThorVG's `wg` engine and this engine must land on the SAME loaded
+# libwgpu_native.so, so the soname stays the default libwgpu_native.so and
+# Gradle stages exactly one copy into jniLibs.
+
+ANDROID_SO = "libwgpu_native.so"
+
+# ABI -> (rust target triple, NDK clang prefix). The clang prefix differs from
+# the rust triple for 32-bit ARM: rust says armv7-linux-androideabi, the NDK
+# ships armv7a-linux-androideabi<api>-clang.
+ANDROID_ABIS: dict[str, tuple[str, str]] = {
+    "arm64-v8a":   ("aarch64-linux-android",     "aarch64-linux-android"),
+    "x86_64":      ("x86_64-linux-android",      "x86_64-linux-android"),
+    "armeabi-v7a": ("armv7-linux-androideabi",   "armv7a-linux-androideabi"),
+}
+
+# Matches [tool.kivy-school.android] min_api, which is pinned at the Swift
+# Android SDK's floor.
+ANDROID_API_DEFAULT = 28
+
+
+
+def find_ndk(explicit: Path | None) -> Path:
+    """Locate an Android NDK, preferring anything the caller/environment names.
+
+    No hardcoded install location and no probing: ksproject provisions the
+    Android toolchain and exports it, so the path is handed in — either as
+    --ndk or via ANDROID_NDK_HOME.
+    """
+    if explicit is not None:
+        return explicit.resolve()
+    # Env first: this is what ksproject exports when *it* drives the build.
+    for var in ("ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"):
+        value = os.environ.get(var)
+        if value:
+            return Path(value).resolve()
+    sys.exit(
+        "error: no Android NDK given.\n"
+        "  Pass --ndk <path>, or set ANDROID_NDK_HOME — ksproject exports it\n"
+        "  when it drives the build; resolve it yourself with\n"
+        "  `uv run ksproject android get-path ndk`."
+    )
+
+
+def ndk_toolchain_bin(ndk: Path) -> Path:
+    host = platform.system().lower()
+    machine = "x86_64" if platform.machine() in ("x86_64", "AMD64") else platform.machine()
+    tag = f"{'darwin' if host == 'darwin' else 'linux'}-{machine}"
+    bin_dir = ndk / "toolchains" / "llvm" / "prebuilt" / tag / "bin"
+    if not bin_dir.is_dir():
+        sys.exit(f"error: NDK toolchain not found at {bin_dir}")
+    return bin_dir
+
+
+def cargo_build_android(src: Path, abi: str, ndk: Path, api: int) -> Path:
+    """Release-build wgpu-native for one Android ABI; return the built .so."""
+    require("cargo")
+    require("rustup")
+    triple, clang_prefix = ANDROID_ABIS[abi]
+
+    run(["rustup", "target", "add", triple], cwd=src)
+
+    bin_dir = ndk_toolchain_bin(ndk)
+    clang = bin_dir / f"{clang_prefix}{api}-clang"
+    if not clang.is_file():
+        sys.exit(
+            f"error: NDK has no compiler for API {api}: {clang}\n"
+            "  Pass --api with a level this NDK supports."
+        )
+
+    sysroot = bin_dir.parent / "sysroot"
+    if not sysroot.is_dir():
+        sys.exit(f"error: NDK sysroot not found at {sysroot}")
+
+    env = dict(os.environ)
+    cargo_bin = Path.home() / ".cargo" / "bin"
+    env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
+    # Cargo reads the linker from CARGO_TARGET_<TRIPLE>_LINKER with the triple
+    # upper-cased and dashes turned into underscores; the cc crate (used by
+    # wgpu's C dependencies) reads CC_/AR_ keyed by the plain triple.
+    env[f"CARGO_TARGET_{triple.upper().replace('-', '_')}_LINKER"] = str(clang)
+    env[f"CC_{triple}"] = str(clang)
+    env[f"AR_{triple}"] = str(bin_dir / "llvm-ar")
+    # wgpu-native's build.rs runs bindgen over its own headers. bindgen drives
+    # libclang directly and does NOT inherit the target from cargo, so without
+    # this it parses against the *host* headers and dies in /usr/include on
+    # `bits/libc-header-start.h` (a glibc-only header the NDK's bionic has no
+    # equivalent of). Pointing it at the NDK target + sysroot is what makes it
+    # read bionic's headers instead.
+    env["BINDGEN_EXTRA_CLANG_ARGS"] = (
+        f"--target={clang_prefix}{api} --sysroot={sysroot}"
+    )
+    # Stamp a SONAME. Without one, anything linking this records the resolved
+    # *build-host path* as its DT_NEEDED, which does not exist on device. It
+    # also underpins the single-instance rule: ThorVG's `wg` engine and this
+    # engine must resolve to the same loaded libwgpu_native.so out of the app's
+    # native library directory, which only works if both record the bare name.
+    rustflags = env.get("RUSTFLAGS", "")
+    env["RUSTFLAGS"] = (
+        f"{rustflags} -Clink-arg=-Wl,-soname,{ANDROID_SO}".strip()
+    )
+
+    run(["cargo", "build", "--release", "--target", triple], cwd=src, env=env)
+    so = src / "target" / triple / "release" / ANDROID_SO
+    if not so.is_file():
+        sys.exit(f"error: expected shared object not produced: {so}")
+    return so
+
+
+def write_android_pkgconfig(abi: str, include_dir: Path, version: str) -> Path:
+    """Emit a per-ABI wgpu-native.pc.
+
+    Swift does not need this — the CWgpu target links by -L/-l directly. ThorVG
+    does: its `wg` engine resolves wgpu_native through pkg-config, and since
+    thorvg builds both ABIs in one run, each needs its own .pc pointing at its
+    own libdir. Mirrors write_pkgconfig() for Linux.
+    """
+    lib_dir = DEPENDENCIES_DIR / "android" / abi / "lib"
+    pc_dir = lib_dir / "pkgconfig"
+    pc_dir.mkdir(parents=True, exist_ok=True)
+    pc_file = pc_dir / "wgpu-native.pc"
+    pc_file.write_text(
+        f"libdir={lib_dir}\n"
+        f"includedir={include_dir}\n"
+        "\n"
+        "Name: wgpu-native\n"
+        "Description: wgpu-native (WebGPU implementation in Rust)\n"
+        f"Version: {version}\n"
+        "\n"
+        "Libs: -L${libdir} -lwgpu_native\n"
+        "Cflags: -I${includedir}\n"
+    )
+    return pc_file
+
+
+def build_android(work_dir: Path, ref: str, abis: list[str], ndk: Path, api: int) -> None:
+    src = work_dir / "wgpu-native"
+    sync_repo(WGPU_REPO, ref, src)
+    log(f"using NDK {ndk} (API {api})")
+
+    # Headers are ABI-independent. Flat layout matching the Linux install and
+    # the xcframework: wgpu.h #includes "webgpu.h" from the same directory.
+    include_dir = DEPENDENCIES_DIR / "android" / "include"
+    include_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / "ffi" / "wgpu.h", include_dir / "wgpu.h")
+    shutil.copy2(src / "ffi" / "webgpu-headers" / "webgpu.h", include_dir / "webgpu.h")
+    log(f"headers installed -> {include_dir}")
+
+    version = ref.lstrip("v")
+    for abi in abis:
+        so = cargo_build_android(src, abi, ndk, api)
+        lib_dir = DEPENDENCIES_DIR / "android" / abi / "lib"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(so, lib_dir / ANDROID_SO)
+        log(f"{abi}: wgpu-native installed -> {lib_dir / ANDROID_SO}")
+        pc = write_android_pkgconfig(abi, include_dir, version)
+        log(f"{abi}: pkg-config file -> {pc}")
+
+
 # --- macOS/iOS -----------------------------------------------------------
 
 def build_apple(work_dir: Path, ref: str) -> None:
@@ -368,6 +534,18 @@ def main() -> int:
                         help="Linux only: install prefix (default: /usr/local)")
     parser.add_argument("--clean", action="store_true",
                         help="wipe the work directory before building")
+    # Android is never the host, so unlike macOS/Linux it cannot be inferred —
+    # it has to be asked for explicitly.
+    parser.add_argument("--android", action="store_true",
+                        help="cross-compile for Android instead of the host")
+    parser.add_argument("--abis", default="arm64-v8a,x86_64",
+                        help="Android only: comma-separated ABIs to build "
+                             f"(choices: {','.join(ANDROID_ABIS)})")
+    parser.add_argument("--ndk", type=Path, default=None,
+                        help="Android only: NDK path (else ANDROID_NDK_HOME / "
+                             "ANDROID_SDK_ROOT/ndk)")
+    parser.add_argument("--api", type=int, default=ANDROID_API_DEFAULT,
+                        help=f"Android only: API level (default: {ANDROID_API_DEFAULT})")
     args = parser.parse_args()
 
     work_dir: Path = args.work_dir.resolve()
@@ -375,6 +553,16 @@ def main() -> int:
         log(f"cleaning {work_dir}")
         shutil.rmtree(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.android:
+        abis = [a.strip() for a in args.abis.split(",") if a.strip()]
+        unknown = [a for a in abis if a not in ANDROID_ABIS]
+        if unknown:
+            sys.exit(f"error: unknown ABI(s) {unknown}; "
+                     f"choices: {', '.join(ANDROID_ABIS)}")
+        build_android(work_dir, args.ref, abis, find_ndk(args.ndk), args.api)
+        log("done")
+        return 0
 
     system = platform.system()
     if system == "Darwin":

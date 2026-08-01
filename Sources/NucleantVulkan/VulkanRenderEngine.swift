@@ -515,6 +515,66 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     }
     #endif
 
+    #if os(Android)
+    /// Android entry point: `VK_KHR_android_surface` from an `ANativeWindow *`.
+    ///
+    /// Same shape as the Wayland/XCB inits above — Android likewise lets the
+    /// loader take a native handle directly, so there is no layer-bridging
+    /// like Apple's CAMetalLayer. Vulkan is part of the platform from API 24
+    /// on, so the loader is the system one and nothing is bundled.
+    ///
+    /// `window` is the pointer the app's SurfaceView hands over through
+    /// `ANativeWindow_fromSurface`; it stays valid until the surface is
+    /// destroyed, which is why teardown has to happen before that callback
+    /// returns.
+    /// `getSize` returns plain pixels rather than a `VkExtent2D` so callers do
+    /// not need the Vulkan headers: on Android `CVulkan` is a systemLibrary and
+    /// SwiftPM cannot re-export it from this package's product, so the platform
+    /// layer in NucleantApplication has no way to name that type.
+    public convenience init(androidWindow window: OpaquePointer, getSize: @escaping () -> (Int, Int)) throws {
+        let availableInstanceExts = enumerateInstanceExtensions()
+        var instanceExtensions = ["VK_KHR_surface", "VK_KHR_android_surface"]
+        if availableInstanceExts.contains("VK_KHR_get_physical_device_properties2") {
+            instanceExtensions.append("VK_KHR_get_physical_device_properties2")
+        }
+
+        var createdInstance: VkInstance?
+        var appInfo = VkApplicationInfo()
+        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO
+        appInfo.apiVersion = (1 << 22) | (2 << 12) // Vulkan 1.2
+        let instResult: VkResult = withUnsafePointer(to: &appInfo) { appPtr in
+            withCStringArray(instanceExtensions) { extPtr, extCount in
+                var ci = VkInstanceCreateInfo()
+                ci.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+                ci.pApplicationInfo = appPtr
+                ci.enabledExtensionCount = extCount
+                ci.ppEnabledExtensionNames = extPtr
+                return vkCreateInstance(&ci, nil, &createdInstance)
+            }
+        }
+        guard instResult == VK_SUCCESS, let instance = createdInstance else {
+            throw VulkanEngineError.instance(instResult.rawValue)
+        }
+
+        var createdSurface: VkSurfaceKHR?
+        var surfaceInfo = VkAndroidSurfaceCreateInfoKHR()
+        surfaceInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR
+        // Imports as OpaquePointer: the NDK header only forward-declares
+        // `struct ANativeWindow`, so Swift never sees a complete type — which
+        // is exactly what the caller already holds.
+        surfaceInfo.window = window
+        let surfResult = vkCreateAndroidSurfaceKHR(instance, &surfaceInfo, nil, &createdSurface)
+        guard surfResult == VK_SUCCESS, let surface = createdSurface else {
+            throw VulkanEngineError.surface(surfResult.rawValue)
+        }
+
+        try self.init(instance: instance, surface: surface, getExtent: {
+            let (w, h) = getSize()
+            return VkExtent2D(width: UInt32(max(w, 0)), height: UInt32(max(h, 0)))
+        })
+    }
+    #endif
+
     deinit {
         vkDeviceWaitIdle(device)
         // Free every live slot's node resources before the device is torn
