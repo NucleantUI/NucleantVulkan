@@ -1,0 +1,9 @@
+libdir=/home/lexmint/nucleant_dev/NucleantVulkan/Dependencies/android/x86_64/lib
+includedir=/home/lexmint/nucleant_dev/NucleantVulkan/Dependencies/android/include
+
+Name: wgpu-native
+Description: wgpu-native (WebGPU implementation in Rust)
+Version: 29.0.1.1
+
+Libs: -L${libdir} -lwgpu_native
+Cflags: -I${includedir}
