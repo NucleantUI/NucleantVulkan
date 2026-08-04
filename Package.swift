@@ -63,6 +63,12 @@ func androidLibDir() -> String {
 
 let platformTarget = getPlatformTarget()
 
+// Set by pyswiftkit-builder for a wheel build. It distinguishes the two macOS
+// modes — `uv run` against a wheel, versus the Xcode app that embeds this
+// package — which differ in whether a dependency should be a bare dylib or a
+// framework bundle. See the MoltenVK binary targets below.
+let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
+
 
 func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -106,17 +112,41 @@ func vulkanTargets() -> [Target] {
         )
     default:
         // Apple: bundled Vulkan headers + MoltenVK xcframework (Vulkan -> Metal).
+        // Two forms of the same Mach-O, the way wgpu already has two:
+        //   • MoltenVK    — MoltenVK.framework (@rpath/MoltenVK.framework/MoltenVK)
+        //   • MoltenVKLib — bare libMoltenVK.dylib (@rpath/libMoltenVK.dylib)
+        // A wheel vendors plain files into nucleant/.dylibs, so PIP_MODE takes
+        // the dylib on macOS; Xcode embed mode keeps the framework, and iOS
+        // has no choice — it links frameworks. Both are produced by
+        // scripts/build_vulkan.py from one build.
         targets.append(
             .binaryTarget(
                 name: "MoltenVK",
                 path: "Dependencies/macos/MoltenVK.xcframework"
             )
         )
-        
+        if PIP_MODE {
+            targets.append(
+                .binaryTarget(
+                    name: "MoltenVKLib",
+                    path: "Dependencies/macos/MoltenVK_lib.xcframework"
+                )
+            )
+        }
+
         targets.append(
             .target(
                 name: "CVulkan",
-                dependencies: [
+                dependencies: PIP_MODE ? [
+                    .byName(
+                        name: "MoltenVKLib",
+                        condition: .when(platforms: [.macOS])
+                    ),
+                    .byName(
+                        name: "MoltenVK",
+                        condition: .when(platforms: [.iOS, .tvOS, .macCatalyst])
+                    )
+                ] : [
                     .byName(
                         name: "MoltenVK",
                         condition: .when(platforms: [.iOS, .macOS, .tvOS, .macCatalyst])

@@ -230,10 +230,35 @@ public final class WgpuContext: @unchecked Sendable {
         self.canvasStorageCapable = bgraStorage
     }
 
-    /// BGRA8Unorm render target for the wg canvas. ThorVG's wg backend
-    /// hardcodes its final "blit" pipeline to WGPUTextureFormat_BGRA8Unorm and
-    /// never reassigns it — so the target must be BGRA8Unorm or the blit
-    /// render pass is format-incompatible and wgpu-native aborts.
+    /// Channel order of every texture `makeTarget` mints.
+    ///
+    /// This is the *only* place that choice is made. An importer building a
+    /// VkImage over the same memory has to declare the same order, so it reads
+    /// this rather than deciding for itself — that pairing is the whole
+    /// contract, and hardcoding it at both ends is what makes a new platform
+    /// look like a colour bug.
+    public enum PixelOrder: Sendable {
+        case bgra8Unorm
+        case rgba8Unorm
+    }
+
+    #if os(Android)
+    /// RGBA, not BGRA: AHardwareBuffer has no BGRA format at all, so a
+    /// zero-copy target has to be RGBA8Unorm. ThorVG adopts the target's format
+    /// (tvgWg_target_format.patch), so it writes true RGBA and the importing
+    /// image *view* is where the channels swap back — see the view format in
+    /// NucleantThorVG's VulkanRenderEngine+Thor.swift, which is BGRA on every
+    /// platform because that is what the composite samples.
+    public static let targetPixelOrder: PixelOrder = .rgba8Unorm
+    #else
+    /// BGRA8Unorm: ThorVG's wg backend hardcodes its final "blit" pipeline to
+    /// WGPUTextureFormat_BGRA8Unorm and never reassigns it, so anywhere the
+    /// target can be BGRA it must be, or the blit render pass is
+    /// format-incompatible and wgpu-native aborts.
+    public static let targetPixelOrder: PixelOrder = .bgra8Unorm
+    #endif
+
+    /// Render target for the wg canvas, in `targetPixelOrder`.
     public func makeTarget(width: Int, height: Int) -> Target? {
         var descriptor = WGPUTextureDescriptor()
         descriptor.usage = WGPUTextureUsage_RenderAttachment
@@ -251,15 +276,10 @@ public final class WgpuContext: @unchecked Sendable {
             height: UInt32(height),
             depthOrArrayLayers: 1
         )
-        #if os(Android)
-        // RGBA, not BGRA: AHardwareBuffer has no BGRA format at all, so a
-        // zero-copy target has to be RGBA8Unorm. ThorVG adopts the target's
-        // format (tvgWg_target_format.patch), and the importing image view
-        // swaps the channels back when sampling.
-        descriptor.format = WGPUTextureFormat_RGBA8Unorm
-        #else
-        descriptor.format = WGPUTextureFormat_BGRA8Unorm
-        #endif
+        switch Self.targetPixelOrder {
+        case .rgba8Unorm: descriptor.format = WGPUTextureFormat_RGBA8Unorm
+        case .bgra8Unorm: descriptor.format = WGPUTextureFormat_BGRA8Unorm
+        }
         descriptor.mipLevelCount = 1
         descriptor.sampleCount = 1
 

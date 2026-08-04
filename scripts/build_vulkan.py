@@ -28,6 +28,14 @@ PACKAGE_ROOT = SCRIPT_DIR.parent
 DEPENDENCIES_DIR = PACKAGE_ROOT / "Dependencies"
 DEFAULT_WORK_DIR = SCRIPT_DIR / ".work"
 
+# The two forms of MoltenVK, mirroring wgpu_native.xcframework /
+# wgpu_native_framework.xcframework: PIP_MODE links the bare dylib so the wheel
+# vendors a plain file into nucleant/.dylibs, Xcode embed mode links the
+# framework. Package.swift resolves both under Dependencies/macos/.
+MOLTENVK_XCFW = DEPENDENCIES_DIR / "macos" / "MoltenVK.xcframework"
+MOLTENVK_LIB_XCFW = DEPENDENCIES_DIR / "macos" / "MoltenVK_lib.xcframework"
+MOLTENVK_DYLIB = "libMoltenVK.dylib"
+
 # --- Upstream sources ------------------------------------------------------
 
 MOLTENVK_REPO = "https://github.com/KhronosGroup/MoltenVK.git"
@@ -95,6 +103,93 @@ def replace_tree(src: Path, dst: Path) -> None:
 
 # --- macOS: MoltenVK -------------------------------------------------------
 
+def _library_xcframework_plist(slices: list[tuple[str, str, list[str]]]) -> str:
+    """Info.plist for an xcframework holding bare dylibs rather than frameworks.
+
+    Each slice is (identifier, library filename, architectures). No HeadersPath
+    key: CVulkan carries its own Vulkan headers, so the binary target is only
+    ever used for linking.
+    """
+    entries = []
+    for identifier, library, arches in slices:
+        archs = "".join(f"\n\t\t\t\t<string>{a}</string>" for a in arches)
+        entries.append(f"""\t\t<dict>
+\t\t\t<key>BinaryPath</key>
+\t\t\t<string>{library}</string>
+\t\t\t<key>LibraryIdentifier</key>
+\t\t\t<string>{identifier}</string>
+\t\t\t<key>LibraryPath</key>
+\t\t\t<string>{library}</string>
+\t\t\t<key>SupportedArchitectures</key>
+\t\t\t<array>{archs}
+\t\t\t</array>
+\t\t\t<key>SupportedPlatform</key>
+\t\t\t<string>macos</string>
+\t\t</dict>""")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "\t<key>AvailableLibraries</key>\n"
+        "\t<array>\n" + "\n".join(entries) + "\n\t</array>\n"
+        "\t<key>CFBundlePackageType</key>\n"
+        "\t<string>XFWK</string>\n"
+        "\t<key>XCFrameworkFormatVersion</key>\n"
+        "\t<string>1.0</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+
+
+def _extract_framework_binary(framework: Path, dest: Path, install_name: str) -> list[str]:
+    """Copy a framework's Mach-O out as a standalone dylib.
+
+    The binary is byte-identical apart from its LC_ID_DYLIB — retargeting it
+    from `@rpath/Foo.framework/Foo` to `@rpath/libfoo.dylib` is what lets
+    consumers link the loose form. `install_name_tool` invalidates the code
+    signature, and an arm64 slice will not load unsigned, so the copy is
+    re-signed ad-hoc.
+    """
+    binary = framework / "Versions" / "A" / framework.stem
+    if not binary.is_file():
+        binary = framework / framework.stem  # shallow bundle (iOS-style layout)
+    if not binary.is_file():
+        sys.exit(f"error: no Mach-O found in {framework}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, dest)
+    run(["install_name_tool", "-id", install_name, str(dest)])
+    run(["codesign", "--force", "--sign", "-", str(dest)])
+
+    arches = subprocess.check_output(["lipo", "-archs", str(dest)], text=True)
+    return arches.split()
+
+
+def install_moltenvk_lib_xcframework() -> None:
+    """Derive MoltenVK_lib.xcframework from the framework xcframework."""
+    require("install_name_tool")
+    slices = sorted(MOLTENVK_XCFW.glob("macos-*"))
+    if not slices:
+        sys.exit(f"error: no macos slice in {MOLTENVK_XCFW}")
+
+    if MOLTENVK_LIB_XCFW.exists():
+        shutil.rmtree(MOLTENVK_LIB_XCFW)
+
+    entries = []
+    for slice_dir in slices:
+        dylib = MOLTENVK_LIB_XCFW / slice_dir.name / MOLTENVK_DYLIB
+        arches = _extract_framework_binary(
+            slice_dir / "MoltenVK.framework", dylib, f"@rpath/{MOLTENVK_DYLIB}"
+        )
+        entries.append((slice_dir.name, MOLTENVK_DYLIB, arches))
+        log(f"extracted {dylib.relative_to(PACKAGE_ROOT)} ({' '.join(arches)})")
+
+    (MOLTENVK_LIB_XCFW / "Info.plist").write_text(_library_xcframework_plist(entries))
+    log("MoltenVK_lib.xcframework installed")
+
+
 def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     require("xcodebuild")
     src = work_dir / "MoltenVK"
@@ -119,8 +214,9 @@ def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     if xcframework is None:
         sys.exit("error: could not locate built MoltenVK.xcframework under Package/")
 
-    replace_tree(xcframework, DEPENDENCIES_DIR / "MoltenVK.xcframework")
+    replace_tree(xcframework, MOLTENVK_XCFW)
     log("MoltenVK.xcframework installed")
+    install_moltenvk_lib_xcframework()
 
 
 # --- Linux: Vulkan-Loader --------------------------------------------------
@@ -172,7 +268,15 @@ def main() -> int:
                         help="parallel build jobs")
     parser.add_argument("--clean", action="store_true",
                         help="wipe the work directory before building")
+    parser.add_argument("--repackage-only", action="store_true",
+                        help="re-derive MoltenVK_lib.xcframework from the already "
+                             "installed MoltenVK.xcframework, without rebuilding")
     args = parser.parse_args()
+
+    if args.repackage_only:
+        install_moltenvk_lib_xcframework()
+        log("done")
+        return 0
 
     work_dir: Path = args.work_dir.resolve()
     if args.clean and work_dir.exists():
