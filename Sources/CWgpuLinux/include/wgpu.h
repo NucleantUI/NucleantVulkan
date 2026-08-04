@@ -1542,6 +1542,21 @@ extern "C"
      */
     WGPUTexture wgpuDeviceCreateTextureWithExportedFd(WGPUDevice device, WGPUTextureDescriptor const * descriptor, int32_t * out_fd);
 
+    /**
+     * Android's counterpart of the above, and the handle type Android actually
+     * guarantees: the emulator exposes
+     * VK_ANDROID_external_memory_android_hardware_buffer but not
+     * VK_KHR_external_memory_fd, so the fd entry point cannot work there.
+     *
+     * The returned AHardwareBuffer* carries a reference belonging to the
+     * caller; release it with AHardwareBuffer_release once the import is done.
+     * Unlike an fd it is not consumed by importing.
+     *
+     * Returns NULL (leaving *out_buffer NULL) if the active backend is not
+     * Vulkan, the device lacks the extension, or creation fails.
+     */
+    WGPUTexture wgpuDeviceCreateTextureWithExportedAHardwareBuffer(WGPUDevice device, WGPUTextureDescriptor const * descriptor, void ** out_buffer);
+
     void wgpuRenderPassEncoderMultiDrawIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
     void wgpuRenderPassEncoderMultiDrawIndexedIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
 

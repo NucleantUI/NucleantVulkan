@@ -186,7 +186,19 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     // MARK: Private state
 
     private static var maxFrames: Int { 2 }
-    private let colorFormat = VK_FORMAT_B8G8R8A8_UNORM
+    /// Swapchain colour format, resolved against the surface rather than
+    /// assumed.
+    ///
+    /// BGRA is what MoltenVK presents natively, and hardcoding it was fine
+    /// while Apple was the only target. Android surfaces are free to report
+    /// something else — the emulator's report R8G8B8A8 first — and a format the
+    /// surface never advertised is not a legal request. Requesting BGRA there
+    /// is honoured literally by the driver and then read back as RGBA by the
+    /// compositor, which swaps red and blue in everything drawn.
+    ///
+    /// Seeded with the Apple-native choice and replaced by
+    /// `chooseSurfaceFormat()` before the swapchain is created.
+    private var colorFormat = VK_FORMAT_B8G8R8A8_UNORM
 
     private var renderPass:      VkRenderPass?
     private var swapchain:       VkSwapchainKHR?
@@ -292,6 +304,19 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // already core since Vulkan 1.1.
         if availableDeviceExts.contains("VK_KHR_external_memory_fd") {
             deviceExtensions.append("VK_KHR_external_memory_fd")
+        }
+        // Android ThorVG zero-copy: the same idea one handle type over. Android
+        // guarantees AHardwareBuffer rather than fds — the emulator offers this
+        // extension and not external_memory_fd — so the import side needs it
+        // enabled here, exactly as the wgpu device needs it on its own side to
+        // export. VK_KHR_sampler_ycbcr_conversion and VK_EXT_queue_family_foreign
+        // are its documented dependencies.
+        for ext in [
+            "VK_ANDROID_external_memory_android_hardware_buffer",
+            "VK_KHR_sampler_ycbcr_conversion",
+            "VK_EXT_queue_family_foreign",
+        ] where availableDeviceExts.contains(ext) {
+            deviceExtensions.append(ext)
         }
         var createdDevice: VkDevice?
         var priority: Float = 1.0
@@ -1240,6 +1265,8 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         var caps = VkSurfaceCapabilitiesKHR()
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps)
 
+        colorFormat = chooseSurfaceFormat()
+
         var newExtent = caps.currentExtent
         if newExtent.width == UInt32.max {
             let drawable = getExtent()
@@ -1872,6 +1899,36 @@ extension VulkanRenderEngine {
     //         sliceCount:     imageCount
     //     )
     // }
+
+    /// The surface's own colour format, preferring BGRA where it is offered.
+    ///
+    /// BGRA first because that is what MoltenVK presents natively and what the
+    /// Metal-import paths elsewhere in this file assume; RGBA is accepted next
+    /// because Android surfaces commonly offer only that. `VK_FORMAT_UNDEFINED`
+    /// as the sole entry is the spec's "any format goes" answer, in which case
+    /// the preference stands.
+    private func chooseSurfaceFormat() -> VkFormat {
+        var count: UInt32 = 0
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, nil)
+        guard count > 0 else { return colorFormat }
+
+        var formats = [VkSurfaceFormatKHR](repeating: VkSurfaceFormatKHR(), count: Int(count))
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &count, &formats)
+
+        if count == 1, formats[0].format == VK_FORMAT_UNDEFINED {
+            return colorFormat
+        }
+
+        let srgb = formats.filter { $0.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
+        let candidates = srgb.isEmpty ? formats : srgb
+        for preferred in [VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM]
+        where candidates.contains(where: { $0.format == preferred }) {
+            return preferred
+        }
+        // Neither 8-bit UNORM order offered: take what the surface leads with
+        // rather than requesting something it never advertised.
+        return candidates[0].format
+    }
 
     /// Whether MoltenVK exposes storage-image use on linear-tiled BGRA8 —
     /// the exact image shape `makeThorNode(importingMetalTexture:)` creates.

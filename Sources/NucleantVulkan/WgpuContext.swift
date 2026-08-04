@@ -70,7 +70,14 @@ public final class WgpuContext: @unchecked Sendable {
         public let width:  Int
         public let height: Int
         public let storageCapable: Bool
-        #if !(os(macOS) || os(iOS))
+        #if os(Android)
+        /// `AHardwareBuffer*` for this target's backing memory. Android's own
+        /// external-memory handle type and the only one it guarantees — the
+        /// emulator has VK_ANDROID_external_memory_android_hardware_buffer but
+        /// no VK_KHR_external_memory_fd — so the fd path below is Linux's.
+        /// Ownership of the reference passes to the importer.
+        fileprivate let hardwareBuffer: UnsafeMutableRawPointer?
+        #elseif !(os(macOS) || os(iOS))
         /// POSIX fd for this target's backing memory
         /// (`VK_KHR_external_memory_fd`), minted alongside the texture itself
         /// — Vulkan has no way to export memory from an already-created
@@ -86,7 +93,8 @@ public final class WgpuContext: @unchecked Sendable {
             width: Int,
             height: Int,
             storageCapable: Bool,
-            exportedFd: Int32? = nil
+            exportedFd: Int32? = nil,
+            hardwareBuffer: UnsafeMutableRawPointer? = nil
         ) {
             self.context        = context
             self.texture        = texture
@@ -94,7 +102,9 @@ public final class WgpuContext: @unchecked Sendable {
             self.width          = width
             self.height         = height
             self.storageCapable = storageCapable
-            #if !(os(macOS) || os(iOS))
+            #if os(Android)
+            self.hardwareBuffer = hardwareBuffer
+            #elseif !(os(macOS) || os(iOS))
             self.exportedFd     = exportedFd
             #endif
         }
@@ -105,6 +115,13 @@ public final class WgpuContext: @unchecked Sendable {
         /// VK_EXT_metal_objects. Metal-only.
         public func nativeMetalTexture() -> UnsafeMutableRawPointer? {
             wgpuTextureGetNativeMetalTexture(texture)
+        }
+        #elseif os(Android)
+        /// The `AHardwareBuffer*` backing this target, for importing as a
+        /// VkImage via `VkImportAndroidHardwareBufferInfoANDROID`. `nil` if the
+        /// device lacks the extension or the export failed at creation time.
+        public func nativeAndroidHardwareBuffer() -> UnsafeMutableRawPointer? {
+            hardwareBuffer
         }
         #else
         /// The POSIX fd for this target's backing memory, for importing as a
@@ -234,7 +251,15 @@ public final class WgpuContext: @unchecked Sendable {
             height: UInt32(height),
             depthOrArrayLayers: 1
         )
+        #if os(Android)
+        // RGBA, not BGRA: AHardwareBuffer has no BGRA format at all, so a
+        // zero-copy target has to be RGBA8Unorm. ThorVG adopts the target's
+        // format (tvgWg_target_format.patch), and the importing image view
+        // swaps the channels back when sampling.
+        descriptor.format = WGPUTextureFormat_RGBA8Unorm
+        #else
         descriptor.format = WGPUTextureFormat_BGRA8Unorm
+        #endif
         descriptor.mipLevelCount = 1
         descriptor.sampleCount = 1
 
@@ -249,6 +274,24 @@ public final class WgpuContext: @unchecked Sendable {
             width:          width,
             height:         height,
             storageCapable: canvasStorageCapable
+        )
+        #elseif os(Android)
+        // No StorageBinding here, same as the Linux branch below.
+        var hardwareBuffer: UnsafeMutableRawPointer? = nil
+        guard let texture = wgpuDeviceCreateTextureWithExportedAHardwareBuffer(
+            device, &descriptor, &hardwareBuffer
+        ) else {
+            print("WgpuContext: wgpuDeviceCreateTextureWithExportedAHardwareBuffer failed "
+                  + "— device may lack VK_ANDROID_external_memory_android_hardware_buffer")
+            return nil
+        }
+        return Target(
+            context:        self,
+            texture:        texture,
+            width:          width,
+            height:         height,
+            storageCapable: false,
+            hardwareBuffer: hardwareBuffer
         )
         #else
         // No StorageBinding here (see the field above the Apple-only branch):

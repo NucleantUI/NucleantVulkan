@@ -55,7 +55,10 @@ DEFAULT_WORK_DIR = SCRIPT_DIR / ".work"
 # --- Upstream source (NucleantUI's fork of gfx-rs/wgpu-native) -------------
 
 WGPU_REPO = "https://github.com/NucleantUI/wgpu-native.git"
-WGPU_REF = "v29.0.1.1"
+# v29.0.1.1 plus wgpuDeviceCreateTextureWithExportedFd — the exportable-memory
+# texture the ThorVG handoff imports on Linux and Android. Upstream has no
+# equivalent, so this tag is the fork's own revision of that upstream release.
+WGPU_REF = "v29.0.1.2"
 
 DYLIB = "libwgpu_native.dylib"
 

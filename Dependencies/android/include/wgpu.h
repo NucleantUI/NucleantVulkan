@@ -1489,6 +1489,24 @@ extern "C"
     WGPUBool wgpuDevicePoll(WGPUDevice device, WGPUBool wait, WGPU_NULLABLE WGPUSubmissionIndex const *submissionIndex);
     WGPUShaderModule wgpuDeviceCreateShaderModuleSpirV(WGPUDevice device, WGPUShaderModuleDescriptorSpirV const *descriptor);
 
+    // External-memory texture export. Creates a texture whose backing memory is
+    // exportable and hands back the platform handle, so another device can
+    // import the same allocation and share the image with no copy. Vulkan only,
+    // and only where the matching device extension is available — both return
+    // NULL otherwise, with the out-parameter left empty.
+#if defined(__linux__) && !defined(__ANDROID__)
+    // VK_KHR_external_memory_fd. The fd is owned by the caller and is consumed
+    // by a successful VkImportMemoryFdInfoKHR import.
+    WGPUTexture wgpuDeviceCreateTextureWithExportedFd(WGPUDevice device, WGPUTextureDescriptor const *descriptor, int32_t *out_fd);
+#endif
+#if defined(__ANDROID__)
+    // VK_ANDROID_external_memory_android_hardware_buffer. Android's own handle
+    // type, and the only one it guarantees. The returned AHardwareBuffer* holds
+    // a reference belonging to the caller; release it with
+    // AHardwareBuffer_release once imported.
+    WGPUTexture wgpuDeviceCreateTextureWithExportedAHardwareBuffer(WGPUDevice device, WGPUTextureDescriptor const *descriptor, void **out_buffer);
+#endif
+
     void wgpuSetLogCallback(WGPULogCallback callback, void *userdata);
 
     void wgpuSetLogLevel(WGPULogLevel level);
