@@ -34,14 +34,25 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     // differs (canvas draw + layout barriers) is what `update` carries.
 
     func destroyResources(engine: Engine)
-    
+
     func getImageView() -> VkImageView?
+
+    /// Called whenever the swapchain resizes, for a node that has no
+    /// `compositeRect` (fills the window). A window-filling node's own
+    /// content has nothing else tracking the window's size — no widget-tree
+    /// frame is involved — so this is what keeps it matching the new extent
+    /// instead of staying at whatever size it was last bound at. A no-op for
+    /// node kinds with nothing size-bound to resize, and for any node that
+    /// does carry a `compositeRect` (its own frame already governs its size).
+    func resizeToFitWindow(width: Int, height: Int, engine: Engine)
 }
 
 extension RenderContainerNode {
 
     /// Fullscreen by default; only slots carrying a widget frame override it.
     public var compositeRect: SIMD4<Double>? { nil }
+
+    public func resizeToFitWindow(width: Int, height: Int, engine: Engine) {}
 
     public typealias Engine = VulkanRenderEngine<Self>
     /// Arm one observation over the node's render-affecting state. A

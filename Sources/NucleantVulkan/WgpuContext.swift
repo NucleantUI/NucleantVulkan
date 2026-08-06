@@ -70,11 +70,9 @@ public final class WgpuContext: @unchecked Sendable {
         public let width:  Int
         public let height: Int
         public let storageCapable: Bool
-        #if os(Android)
-        /// `AHardwareBuffer*` for this target's backing memory. Android's own
-        /// external-memory handle type and the only one it guarantees — the
-        /// emulator has VK_ANDROID_external_memory_android_hardware_buffer but
-        /// no VK_KHR_external_memory_fd — so the fd path below is Linux's.
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        /// `AHardwareBuffer*` for this target's backing memory. Opt-in only —
+        /// see the `ANDROID_USE_AHARDWAREBUFFER` flag in Package.swift.
         /// Ownership of the reference passes to the importer.
         fileprivate let hardwareBuffer: UnsafeMutableRawPointer?
         #elseif !(os(macOS) || os(iOS))
@@ -84,6 +82,8 @@ public final class WgpuContext: @unchecked Sendable {
         /// texture, so the fd is captured at creation time in `makeTarget`.
         /// Ownership passes to whichever `VkImportMemoryFdInfoKHR` import
         /// consumes it (the spec-mandated contract); nil if export failed.
+        /// Shared by Linux and Android — both go through wgpu's Vulkan
+        /// backend, so both export the same way.
         fileprivate let exportedFd: Int32?
         #endif
 
@@ -102,7 +102,7 @@ public final class WgpuContext: @unchecked Sendable {
             self.width          = width
             self.height         = height
             self.storageCapable = storageCapable
-            #if os(Android)
+            #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
             self.hardwareBuffer = hardwareBuffer
             #elseif !(os(macOS) || os(iOS))
             self.exportedFd     = exportedFd
@@ -116,7 +116,7 @@ public final class WgpuContext: @unchecked Sendable {
         public func nativeMetalTexture() -> UnsafeMutableRawPointer? {
             wgpuTextureGetNativeMetalTexture(texture)
         }
-        #elseif os(Android)
+        #elseif os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
         /// The `AHardwareBuffer*` backing this target, for importing as a
         /// VkImage via `VkImportAndroidHardwareBufferInfoANDROID`. `nil` if the
         /// device lacks the extension or the export failed at creation time.
@@ -242,7 +242,7 @@ public final class WgpuContext: @unchecked Sendable {
         case rgba8Unorm
     }
 
-    #if os(Android)
+    #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
     /// RGBA, not BGRA: AHardwareBuffer has no BGRA format at all, so a
     /// zero-copy target has to be RGBA8Unorm. ThorVG adopts the target's format
     /// (tvgWg_target_format.patch), so it writes true RGBA and the importing
@@ -261,10 +261,26 @@ public final class WgpuContext: @unchecked Sendable {
     /// Render target for the wg canvas, in `targetPixelOrder`.
     public func makeTarget(width: Int, height: Int) -> Target? {
         var descriptor = WGPUTextureDescriptor()
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        // No Copy{Src,Dst} here: wgpuDeviceCreateTextureWithExportedAHardwareBuffer
+        // maps wgpu texture usage straight into the exported VkImage's usage,
+        // which the driver then maps into the AHardwareBuffer's own usage
+        // flags (VK_ANDROID_external_memory_android_hardware_buffer's mapping
+        // table). Including Copy{Src,Dst} adds AHARDWAREBUFFER_USAGE_CPU_*
+        // bits, which pushes the allocation onto a CPU-visible/software path
+        // on some drivers — expensive, and unused here anyway: ThorVG's wg
+        // backend blits into this target via its render pass (a draw, not a
+        // copyTextureToTexture), and our side only samples it when
+        // compositing. RenderAttachment + TextureBinding alone map to just
+        // AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | GPU_SAMPLED_IMAGE.
+        descriptor.usage = WGPUTextureUsage_RenderAttachment
+            | WGPUTextureUsage_TextureBinding
+        #else
         descriptor.usage = WGPUTextureUsage_RenderAttachment
             | WGPUTextureUsage_TextureBinding
             | WGPUTextureUsage_CopySrc
             | WGPUTextureUsage_CopyDst
+        #endif
         #if os(macOS) || os(iOS)
         if canvasStorageCapable {
             descriptor.usage |= WGPUTextureUsage_StorageBinding
@@ -295,8 +311,8 @@ public final class WgpuContext: @unchecked Sendable {
             height:         height,
             storageCapable: canvasStorageCapable
         )
-        #elseif os(Android)
-        // No StorageBinding here, same as the Linux branch below.
+        #elseif os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        // No StorageBinding here, same as the fd branch below.
         var hardwareBuffer: UnsafeMutableRawPointer? = nil
         guard let texture = wgpuDeviceCreateTextureWithExportedAHardwareBuffer(
             device, &descriptor, &hardwareBuffer
@@ -318,7 +334,7 @@ public final class WgpuContext: @unchecked Sendable {
         // the export path's hal-level usage mapping only covers the plain
         // color-attachment/sampled/copy case a ThorVG render target needs, not
         // storage — canvas post-shaders on ThorVG canvases aren't supported
-        // through this path yet.
+        // through this path yet. Shared by Linux and Android.
         var exportedFd: Int32 = -1
         guard let texture = wgpuDeviceCreateTextureWithExportedFd(device, &descriptor, &exportedFd) else {
             print("WgpuContext: wgpuDeviceCreateTextureWithExportedFd failed — driver may lack VK_KHR_external_memory_fd")

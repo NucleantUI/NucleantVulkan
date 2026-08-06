@@ -297,20 +297,21 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         if availableDeviceExts.contains("VK_EXT_metal_objects") {
             deviceExtensions.append("VK_EXT_metal_objects")
         }
-        // Linux ThorVG zero-copy: import wgpu-native's exported memory fd
-        // (VK_KHR_external_memory_fd) as a VkImage on *this* device — the
+        // Linux/Android ThorVG zero-copy: import wgpu-native's exported memory
+        // fd (VK_KHR_external_memory_fd) as a VkImage on *this* device — the
         // Linux/Vulkan mirror of VK_EXT_metal_objects above. Both device
         // extensions are the cross-platform half of VK_KHR_external_memory,
         // already core since Vulkan 1.1.
         if availableDeviceExts.contains("VK_KHR_external_memory_fd") {
             deviceExtensions.append("VK_KHR_external_memory_fd")
         }
-        // Android ThorVG zero-copy: the same idea one handle type over. Android
-        // guarantees AHardwareBuffer rather than fds — the emulator offers this
-        // extension and not external_memory_fd — so the import side needs it
-        // enabled here, exactly as the wgpu device needs it on its own side to
-        // export. VK_KHR_sampler_ycbcr_conversion and VK_EXT_queue_family_foreign
-        // are its documented dependencies.
+        #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
+        // Android ThorVG zero-copy, opt-in build only (see
+        // ANDROID_USE_AHARDWAREBUFFER in Package.swift): the same idea one
+        // handle type over, for devices/emulators that support this instead
+        // of (or in addition to) VK_KHR_external_memory_fd.
+        // VK_KHR_sampler_ycbcr_conversion and VK_EXT_queue_family_foreign are
+        // its documented dependencies.
         for ext in [
             "VK_ANDROID_external_memory_android_hardware_buffer",
             "VK_KHR_sampler_ycbcr_conversion",
@@ -318,6 +319,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         ] where availableDeviceExts.contains(ext) {
             deviceExtensions.append(ext)
         }
+        #endif
         var createdDevice: VkDevice?
         var priority: Float = 1.0
         let devResult: VkResult = withUnsafePointer(to: &priority) { priorityPtr in
@@ -1256,9 +1258,28 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         }
     }
 
+    /// The one place every resize path (the proactive check above, and the
+    /// reactive VK_ERROR_OUT_OF_DATE_KHR/VK_SUBOPTIMAL_KHR recovery around
+    /// acquire/present) funnels through, so this is also the one place that
+    /// needs to keep window-filling nodes matching the new extent — every
+    /// window-filling node's own content otherwise has nothing else tracking
+    /// the window's size (no widget-tree frame is involved for those), the
+    /// same seam RenderBinder/compositeRect already uses (falls back to this
+    /// extent for those same nodes) — so a rotation or any other plain resize
+    /// needs nothing from the widget tree.
     private func recreateSwapchain() {
         vkDeviceWaitIdle(device)
+        let oldWidth = extent.width, oldHeight = extent.height
         try? createSwapchain()
+        // Guards a swapchain recreate that didn't actually change size (the
+        // reactive OUT_OF_DATE/SUBOPTIMAL paths call this unconditionally,
+        // not only on an actual size change) and one that silently failed
+        // (createSwapchain can throw, swallowed by `try?`, leaving the old
+        // extent in place) — neither should touch node content.
+        guard extent.width != oldWidth || extent.height != oldHeight else { return }
+        for node in nodes {
+            node.resizeToFitWindow(width: Int(extent.width), height: Int(extent.height), engine: self)
+        }
     }
 
     private func createSwapchain() throws {
@@ -1294,7 +1315,30 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         info.imageArrayLayers = 1
         info.imageUsage       = VkImageUsageFlags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT.rawValue)
         info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE
+        #if os(Android)
+        // IDENTITY, not caps.currentTransform: the latter tells the
+        // presentation engine "trust me, my pixels are already rotated to
+        // match the display" — a promise nothing in this renderer keeps, since
+        // it always draws the scene in the surface's own width/height with no
+        // compensating transform of its own. currentTransform genuinely
+        // changes with device rotation on Android, so that broken promise is
+        // exactly what showed up as window content staying in its original
+        // orientation (even on a fresh launch already rotated) while only the
+        // swapchain's width/height followed the rotation. Requesting IDENTITY
+        // instead hands the rotation compositing to the system compositor, so
+        // nothing up the stack — this renderer, RenderBinder, or an app's own
+        // window code — needs any orientation awareness at all, only
+        // width/height. Scoped to Android only: every other platform's
+        // currentTransform is already effectively identity (MoltenVK reports
+        // only IDENTITY for a CAMetalLayer surface; Wayland/X11 have no
+        // equivalent pre-rotation concept), so there is nothing to fix there
+        // and no reason to touch behavior that already works.
+        info.preTransform = caps.supportedTransforms & UInt32(VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR.rawValue) != 0
+            ? VkSurfaceTransformFlagBitsKHR(rawValue: VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR.rawValue)
+            : caps.currentTransform
+        #else
         info.preTransform     = caps.currentTransform
+        #endif
         info.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
         info.presentMode      = VK_PRESENT_MODE_FIFO_KHR
         info.clipped          = VK_TRUE

@@ -69,6 +69,16 @@ let platformTarget = getPlatformTarget()
 // framework bundle. See the MoltenVK binary targets below.
 let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
 
+// Opt-in only, never the default: Android's ThorVG zero-copy render target
+// normally imports via VK_KHR_external_memory_fd, same as Linux/Wayland. Set
+// this to build the AHardwareBuffer path instead — confirmed much slower on
+// real Android hardware, so it exists purely for cases where the fd path
+// isn't usable (e.g. an emulator whose virtualized Vulkan driver doesn't
+// expose VK_KHR_external_memory_fd regardless of host GPU passthrough).
+// Produces a separate build, same pattern as PIP_MODE above — not a runtime
+// fallback.
+let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_ANDROID_USE_AHARDWAREBUFFER"] == "1"
+
 
 func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -401,7 +411,8 @@ func mainTargets() -> [Target] {
                     deps.append(.byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])))
                 }
                 return deps
-            }()
+            }(),
+            swiftSettings: ANDROID_USE_AHARDWAREBUFFER ? [.define("NUCLEANT_ANDROID_USE_AHARDWAREBUFFER")] : []
         ),
         .testTarget(
             name: "NucleantVulkanTests",
