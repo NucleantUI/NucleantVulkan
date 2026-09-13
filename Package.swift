@@ -4,7 +4,22 @@
 import Foundation
 import PackageDescription
 
-let localDev = true
+/// Build against the sibling checkouts (`../SulphurGeometry`) or against GitHub.
+///
+/// Decided the same way in every Nucleant package, so one setting covers the
+/// whole chain: `NUCLEANT_LOCAL_DEV=1|0` in the environment wins; otherwise
+/// local when the sibling checkout exists next to this package — true in a
+/// development tree, false for a clone SwiftPM made under `.build/checkouts`,
+/// which is what lets a git consumer resolve the chain without editing
+/// anything. Path dependencies are not allowed in a package fetched by
+/// revision, so a hardcoded `true` on master breaks every remote consumer.
+let localDev: Bool = {
+    if let flag = ProcessInfo.processInfo.environment["NUCLEANT_LOCAL_DEV"] {
+        return ["1", "true", "yes"].contains(flag.lowercased())
+    }
+    let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("SulphurGeometry").path)
+}()
 
 func getPlatformTarget() -> PackageDescription.Platform {
     // Package.swift is always compiled and run by the *host* toolchain, even
@@ -85,7 +100,7 @@ func getDependencies() -> [Package.Dependency] {
     if localDev {
         deps.append(.package(path: "../SulphurGeometry"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "master"))
+        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "main"))
     }
     return deps
 }
