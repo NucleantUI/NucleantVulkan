@@ -10,33 +10,44 @@ import Observation
 public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendable {
     var id: Int { get }
     var context: Context { get }
-
+    
     init(id: Int, context: Context)
-
+    
     
     associatedtype Context: RenderNodeContext
     func observeContext()
     func observe<Node: VulkanRenderNode>(_ node: Node)
     
     var needsRender: Bool { get set }
-
+    
     /// Where this slot composites in the swapchain — (x, y, width, height) in
     /// pixels. `nil` composites fullscreen (the legacy behaviour).
     var compositeRect: SIMD4<Double>? { get }
 
-
+    /// Restricts *where the composite may draw* without changing where the
+    /// slot's image is mapped — (x, y, width, height) in pixels, `nil` for no
+    /// restriction.
+    ///
+    /// Needed when a slot's view sits inside a clipping container: a scroll
+    /// view's rows must be cut off at its edge, but cropping `compositeRect`
+    /// would squash the image into the visible sliver instead of hiding the
+    /// rest of it. So the viewport keeps the view's full frame and this becomes
+    /// the scissor.
+    var compositeScissor: SIMD4<Double>? { get }
+    
+    
     func update(engine: Engine, cmd: VkCommandBuffer)
-
+    
     // recordComposite lives on the engine, not here: sampling a node's
     // published image onto the swapchain is identical for every node kind
     // (it only needs `getImageView()`), so it's engine-generic — see
     // VulkanRenderEngine.recordComposite(of:). Per-node work that actually
     // differs (canvas draw + layout barriers) is what `update` carries.
-
+    
     func destroyResources(engine: Engine)
-
+    
     func getImageView() -> VkImageView?
-
+    
     /// Called whenever the swapchain resizes, for a node that has no
     /// `compositeRect` (fills the window). A window-filling node's own
     /// content has nothing else tracking the window's size — no widget-tree
@@ -48,37 +59,41 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
 }
 
 extension RenderContainerNode {
-
+    
     /// Fullscreen by default; only slots carrying a widget frame override it.
     public var compositeRect: SIMD4<Double>? { nil }
 
+    /// Unrestricted by default — only a slot inside a clipping container needs
+    /// this, so existing node types are unaffected.
+    public var compositeScissor: SIMD4<Double>? { nil }
+    
     public func resizeToFitWindow(width: Int, height: Int, engine: Engine) {}
-
+    
     public typealias Engine = VulkanRenderEngine<Self>
     /// Arm one observation over the node's render-affecting state. A
-        /// registration fires exactly once, so `onChange` re-arms; `node` is
-        /// captured weakly because the node's registrar holds this closure —
-        /// a strong capture would be a self-retain-cycle on the node.
-        public func observe<Node: VulkanRenderNode>(_ node: Node) {
-            withObservationTracking { [weak node] in
-                guard let node else { return }
-                _ = node.dirty
-                _ = node.computePipeline
-                _ = node.computeLayout
-                _ = node.computeDescriptorSet
-            } onChange: { [weak self, weak node] in
-                guard let self = self, let node else { return }
-                self.needsRender = true
-                self.observe(node)
-            }
+    /// registration fires exactly once, so `onChange` re-arms; `node` is
+    /// captured weakly because the node's registrar holds this closure —
+    /// a strong capture would be a self-retain-cycle on the node.
+    public func observe<Node: VulkanRenderNode>(_ node: Node) {
+        withObservationTracking { [weak node] in
+            guard let node else { return }
+            _ = node.dirty
+            _ = node.computePipeline
+            _ = node.computeLayout
+            _ = node.computeDescriptorSet
+        } onChange: { [weak self, weak node] in
+            guard let self = self, let node else { return }
+            self.needsRender = true
+            self.observe(node)
         }
-
+    }
+    
     static func new(id: Int, context: Context) -> Self {
         let new = Self.init(id: id, context: context)
         new.observeContext()
         return new
     }
-
+    
 }
 
 public protocol RenderNodeContext {

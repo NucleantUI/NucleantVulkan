@@ -14,6 +14,14 @@ public final class VKShaderCompiler {
     public static let shared = VKShaderCompiler()
     
     private var cache: [String: [UInt32]] = [:]
+
+    /// shaderc's diagnostics from the most recent failed `compile`.
+    ///
+    /// The message used to be read and thrown away, which left a caller with
+    /// nothing but "compilation failed" — unhelpful when the source is a
+    /// shader someone just pasted in. Kept here rather than changing the
+    /// return type, so existing callers are unaffected.
+    public private(set) var lastErrorMessage: String?
     private nonisolated(unsafe) let compiler: OpaquePointer
     
     private init() {
@@ -92,9 +100,10 @@ public final class VKShaderCompiler {
         let status = shaderc_result_get_compilation_status(result)
         if status != shaderc_compilation_status_success {
             let errorMsg = shaderc_result_get_error_message(result)
-            _ = errorMsg != nil ? String(cString: errorMsg!) : "Unknown error"
+            lastErrorMessage = errorMsg.map { String(cString: $0) } ?? "unknown error"
             return nil
         }
+        lastErrorMessage = nil
         
         // Get SPIR-V binary
         let length = shaderc_result_get_length(result)

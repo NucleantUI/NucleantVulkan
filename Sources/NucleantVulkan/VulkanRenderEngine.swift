@@ -1039,25 +1039,46 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
             // A slot with a composite rect draws into that sub-region of the
             // swapchain (its widget frame); otherwise it fills the screen.
             let viewport: VkViewport
-            let scissor: VkRect2D
+            var scissor: VkRect2D
             if let r = node.compositeRect, r.z > 0, r.w > 0 {
                 viewport = VkViewport(
                     x: Float(r.x), y: Float(r.y),
                     width:  Float(r.z), height: Float(r.w),
                     minDepth: 0, maxDepth: 1
                 )
-                scissor = VkRect2D(
-                    offset: VkOffset2D(x: Int32(r.x), y: Int32(r.y)),
-                    extent: VkExtent2D(width: UInt32(r.z), height: UInt32(r.w))
-                )
+                scissor = clampedScissor(x: r.x, y: r.y, width: r.z, height: r.w)
             } else {
                 viewport = fullViewport
                 scissor  = fullScissor
+            }
+            // A slot inside a clipping container narrows the scissor only, so
+            // its image stays mapped to the full viewport and is simply cut
+            // off rather than squeezed.
+            if let clip = node.compositeScissor {
+                scissor = clampedScissor(x: clip.x, y: clip.y, width: clip.z, height: clip.w)
             }
             recordComposite(of: node, cmd: cmd, viewport: viewport, scissor: scissor)
         }
 
         vkCmdEndRenderPass(cmd)
+    }
+
+    /// A `VkRect2D` clipped to the swapchain. Vulkan rejects a negative
+    /// scissor offset and one running past the framebuffer, both of which a
+    /// scrolled-off view produces naturally; an empty intersection comes back
+    /// as a zero-extent rect, which draws nothing.
+    private func clampedScissor(x: Double, y: Double, width: Double, height: Double) -> VkRect2D {
+        let minX = Swift.max(0.0, x)
+        let minY = Swift.max(0.0, y)
+        let maxX = Swift.min(Double(extent.width), x + width)
+        let maxY = Swift.min(Double(extent.height), y + height)
+        return VkRect2D(
+            offset: VkOffset2D(x: Int32(minX), y: Int32(minY)),
+            extent: VkExtent2D(
+                width:  UInt32(Swift.max(0, maxX - minX)),
+                height: UInt32(Swift.max(0, maxY - minY))
+            )
+        )
     }
 
     /// Composite one slot, recursing into groups. A slot only draws once a
