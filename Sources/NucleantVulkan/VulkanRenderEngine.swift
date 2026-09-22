@@ -2059,6 +2059,18 @@ extension VulkanRenderEngine {
         return (props.linearTilingFeatures & VkFormatFeatureFlags(VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT.rawValue)) != 0
     }
 
+    /// Block until the last frame submitted has finished on the GPU —
+    /// nothing that frame read or wrote is still in use. For a host that
+    /// writes a node's image outside this queue after a frame read it (a
+    /// ThorVG canvas, on wgpu's queue, that `ImageNode`s copied out of):
+    /// the frame's fence is what says the reads are done, and the write
+    /// must wait for it. Returns at once when that frame already has.
+    public func waitForPreviousFrame() {
+        guard !inFlight.isEmpty else { return }
+        var fence = inFlight[(frameIndex + Self.maxFrames - 1) % Self.maxFrames]
+        vkWaitForFences(device, 1, &fence, VK_TRUE, UInt64.max)
+    }
+
     /// Record + submit a transient command buffer and block until done.
     public func oneTimeSubmit(_ body: (VkCommandBuffer) -> Void) {
         var cmd: VkCommandBuffer?

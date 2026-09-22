@@ -362,7 +362,16 @@ public final class WgpuContext: @unchecked Sendable {
         // trailing non-blocking poll lets wgpu_core reclaim per-submission
         // tracking data (otherwise leaked ~3.4 KB per canvas draw).
         defer { _ = wgpuDevicePoll(device, 0 /* don't block */, nil) }
-        guard let rawQueue = wgpuQueueGetNativeMetalCommandQueue(queue) else { return }
+        guard let rawQueue = wgpuQueueGetNativeMetalCommandQueue(queue) else {
+            // No native queue from this wgpu-native build (wgpu-hal v29
+            // dropped the accessor; the fork's stub returns null), and a
+            // wait that then waits for nothing lets a copy out of the
+            // image on the Vulkan queue overtake ThorVG's blit — seen as
+            // an `ImageNode` holding what its source held the pass
+            // before. The blocking poll is the wait, as off Apple.
+            _ = wgpuDevicePoll(device, 1 /* wait */, nil)
+            return
+        }
         let mtlQueue = Unmanaged<AnyObject>.fromOpaque(rawQueue).takeUnretainedValue() as! MTLCommandQueue
         guard let fence = mtlQueue.makeCommandBuffer() else { return }
         fence.commit()
