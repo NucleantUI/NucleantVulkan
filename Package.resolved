@@ -1,0 +1,15 @@
+{
+  "originHash" : "411de9e9ecfb086a9ef83389431478c4e571b142f04f29563019efe04c9bda5e",
+  "pins" : [
+    {
+      "identity" : "sulphurgeometry",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/NucleantUI/SulphurGeometry",
+      "state" : {
+        "branch" : "main",
+        "revision" : "c7b860882780954745cdb22a358c9f74c4261abf"
+      }
+    }
+  ],
+  "version" : 3
+}
