@@ -151,14 +151,46 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         releaseTracking(of: id)
     }
 
+    /// Run `release` once every frame submitted so far has finished on the
+    /// GPU: for what a resize just swapped out of a node — its old image,
+    /// view, memory — which a frame still in flight may be sampling. Never
+    /// blocks, unlike `vkDeviceWaitIdle`: the frames it waits on are checked
+    /// as later frames begin, and it runs at the first that finds them done.
+    public func releaseAfterInFlightFrames(_ release: @escaping () -> Void) {
+        pendingReleases.append((after: submittedFrames, release: release))
+    }
+
+    /// Run the releases whose frames the GPU has finished. Each slot's fence,
+    /// once signalled, says the frame it last carried is done.
+    private func runFinishedReleases() {
+        guard !pendingReleases.isEmpty else { return }
+        for slot in inFlight.indices where vkGetFenceStatus(device, inFlight[slot]) == VK_SUCCESS {
+            completedFrames = Swift.max(completedFrames, slotFrames[slot])
+        }
+        let completed = completedFrames
+        guard pendingReleases.contains(where: { $0.after <= completed }) else { return }
+        var waiting: [(after: UInt64, release: () -> Void)] = []
+        for pending in pendingReleases {
+            if pending.after <= completed {
+                pending.release()
+            } else {
+                waiting.append(pending)
+            }
+        }
+        pendingReleases = waiting
+    }
+
     /// Everything the engine tracked against a slot id — descriptor set +
     /// its dedicated pool, readable state, warn-once marker. Shared by
     /// `remove(id:)` / `replace(id:with:)`; the next frame re-derives it
     /// all for whatever occupies the id afterwards.
     private func releaseTracking(of id: Int) {
         nodeSets.removeValue(forKey: id)
+        // A frame still in flight may be binding the set — the pool goes
+        // once those frames are done.
         if let pool = nodeDescriptorPools.removeValue(forKey: id) {
-            vkDestroyDescriptorPool(device, pool, nil)
+            let device = device
+            releaseAfterInFlightFrames { vkDestroyDescriptorPool(device, pool, nil) }
         }
         readable.remove(id)
         warnedFailedNodes.remove(id)
@@ -213,6 +245,14 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     private var imageAvailable: [VkSemaphore?]     = []
     private var renderFinished: [VkSemaphore?]     = []
     private var inFlight:       [VkFence?]         = []
+
+    /// Frames submitted so far, the frame each in-flight slot last carried,
+    /// and the newest one known to have finished on the GPU — what
+    /// `releaseAfterInFlightFrames` counts against.
+    private var submittedFrames: UInt64 = 0
+    private var slotFrames: [UInt64] = []
+    private var completedFrames: UInt64 = 0
+    private var pendingReleases: [(after: UInt64, release: () -> Void)] = []
 
     /// Descriptor set per node (keyed by identity) — image views are stable
     /// for a node's lifetime, so one set-update at creation is enough. Each
@@ -655,6 +695,8 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
 
     deinit {
         vkDeviceWaitIdle(device)
+        for pending in pendingReleases { pending.release() }
+        pendingReleases.removeAll()
         // Free every live slot's node resources before the device is torn
         // down — each routes to its node's destroyResources. vkDestroyDevice
         // would reclaim the memory regardless, but explicit teardown keeps
@@ -705,6 +747,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         let frame = frameIndex
         var fence = inFlight[frame]
         vkWaitForFences(device, 1, &fence, VK_TRUE, UInt64.max)
+        runFinishedReleases()
 
         var imageIndex: UInt32 = 0
         let acquire = vkAcquireNextImageKHR(
@@ -743,6 +786,8 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
 
         // 3. Submit + present.
         guard submit(cmd, frame: frame) == VK_SUCCESS else { return }
+        submittedFrames += 1
+        slotFrames[frame] = submittedFrames
         let present = presentFrame(imageIndex: imageIndex, frame: frame)
         if present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR {
             recreateSwapchain()
@@ -1209,6 +1254,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
                 throw VulkanEngineError.sync
             }
             inFlight.append(fence)
+            slotFrames.append(0)
         }
     }
 }
