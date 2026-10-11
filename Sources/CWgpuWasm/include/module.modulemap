@@ -1,0 +1,4 @@
+module CWgpu {
+    header "webgpu/webgpu.h"
+    export *
+}

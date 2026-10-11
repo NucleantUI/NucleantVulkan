@@ -20,9 +20,10 @@
 import VulkanCore
 import CVulkan
 // wgpu-native C API: bare-dylib module on macOS, framework module on iOS.
+// None on wasm, where the browser's WebGPU is the device itself.
 #if os(iOS)
 import wgpu_native
-#else
+#elseif !os(WASI)
 import CWgpu
 #endif
 import NucleantShader

@@ -40,6 +40,12 @@ func getPlatformTarget() -> PackageDescription.Platform {
     if env["SWIFT_ANDROID_HOME"] != nil || env["ANDROID_BUILD"] != nil {
         return .android
     }
+    // WebAssembly (`swift build --swift-sdk <version>_wasm`) is a
+    // cross-compile from any host, same as Android, so it is the same kind of
+    // explicit opt-in.
+    if env["WASM_BUILD"] == "1" {
+        return .wasi
+    }
 #if os(Linux)
     return .linux
 #else
@@ -74,6 +80,12 @@ func androidLibDir() -> String {
     return packageRoot
         .appendingPathComponent("Dependencies/android/\(androidABI())/lib")
         .path
+}
+
+/// Vendored wasm32-wasip1 archives (scripts/build_shader_tools_wasm.py).
+func wasmLibDir() -> String {
+    let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    return packageRoot.appendingPathComponent("Dependencies/wasm/lib").path
 }
 
 let platformTarget = getPlatformTarget()
@@ -133,6 +145,28 @@ func vulkanTargets() -> [Target] {
             .systemLibrary(
                 name: "CVulkan",
                 path: "Sources/CVulkanAndroid"
+            )
+        )
+    case let p where p == .wasi:
+        // WebAssembly: no Vulkan driver exists in a browser, so this target
+        // *is* the driver — the Vulkan API implemented on the browser's
+        // WebGPU, the way MoltenVK implements it on Metal. The C side keeps
+        // the Vulkan state; Web/nucleant-webgpu.js makes the WebGPU calls
+        // (imported as the "nucleant_webgpu" wasm module) and
+        // Web/naga_webgpu.wasm (NagaWebGPU/) turns SPIR-V into WGSL.
+        targets.append(
+            .target(
+                name: "CVulkan",
+                path: "Sources/CVulkanWasm",
+                sources: [
+                    "vkw_device.c",
+                    "vkw_memory.c",
+                    "vkw_descriptor.c",
+                    "vkw_pipeline.c",
+                    "vkw_command.c",
+                    "vkw_queue.c",
+                ],
+                publicHeadersPath: "include"
             )
         )
     default:
@@ -243,6 +277,64 @@ func vulkanTargets() -> [Target] {
                     .linkedLibrary("wgpu_native"),
                     .unsafeFlags(["-L\(libDir)"]),
                 ]
+            )
+        )
+    } else if platformTarget == .wasi {
+        // shaderc and spirv-cross compiled for wasm32-wasip1 and vendored as
+        // static archives — the browser has no loader to resolve shared
+        // libraries, so everything links into the one module. Headers sit in
+        // each target's own include/, as on Android.
+        let libDir = wasmLibDir()
+        targets.append(
+            .target(
+                name: "CShaderc",
+                path: "Sources/CShadercWasm",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("shaderc_combined"),
+                    .linkedLibrary("c++"),
+                    .unsafeFlags(["-L\(libDir)"]),
+                ]
+            )
+        )
+        targets.append(
+            .target(
+                name: "CSPIRVCross",
+                path: "Sources/CSPIRVCrossWasm",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("spirv-cross-c"),
+                    .linkedLibrary("spirv-cross-glsl"),
+                    .linkedLibrary("spirv-cross-hlsl"),
+                    .linkedLibrary("spirv-cross-msl"),
+                    .linkedLibrary("spirv-cross-cpp"),
+                    .linkedLibrary("spirv-cross-reflect"),
+                    .linkedLibrary("spirv-cross-util"),
+                    .linkedLibrary("spirv-cross-core"),
+                    .linkedLibrary("c++"),
+                    .unsafeFlags(["-L\(libDir)"]),
+                ]
+            )
+        )
+        // webgpu.h, the C API wgpu-native provides everywhere else, on the
+        // browser's WebGPU — the same device the CVulkan target above runs
+        // on (Web/nucleant-wgpu.js is its JS half). What WgpuContext and
+        // ThorVG's wg engine draw through; same module name as the native
+        // CWgpu so both `import CWgpu`.
+        targets.append(
+            .target(
+                name: "CWgpu",
+                path: "Sources/CWgpuWasm",
+                sources: ["webgpu_wasm.c"],
+                publicHeadersPath: "include"
             )
         )
     } else if platformTarget == .linux {
@@ -415,14 +507,15 @@ func mainTargets() -> [Target] {
                 // Linux/Android — a `.when(platforms:)` condition only gates
                 // linking, not whether the referenced target has to exist.
                 var deps: [Target.Dependency] = [
-                    // .android included: the Android branch of vulkanTargets()
-                    // declares its own CWgpu (vendored libwgpu_native.so),
-                    // and without it here the target exists but never links.
-                    .byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux, .android])),
                     "VulkanCore",
                     "NucleantShader"
                 ]
-                if platformTarget != .linux && platformTarget != .android {
+                // .android included: the Android branch of vulkanTargets()
+                // declares its own CWgpu (vendored libwgpu_native.so), and
+                // without it here the target exists but never links. On wasm
+                // CWgpu is webgpu.h on the browser's WebGPU.
+                deps.insert(.byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux, .android, .wasi])), at: 0)
+                if platformTarget != .linux && platformTarget != .android && platformTarget != .wasi {
                     deps.append(.byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])))
                 }
                 return deps
@@ -451,6 +544,8 @@ func getProducts() -> [Product] {
     // only one target"), so there it's left out of NucleantVulkan's product —
     // it's still reachable as an internal build dependency, just not
     // re-exported as part of this product's public target list.
+    // On wasm CVulkan is an ordinary C target (the WebGPU-backed driver), so
+    // it is re-exported the way the Apple one is.
     let vulkanTargets: [String] = platformTarget == .linux || platformTarget == .android
         ? ["NucleantVulkan"]
         : ["NucleantVulkan", "CVulkan"]

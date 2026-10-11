@@ -21,6 +21,9 @@
 //  or the `Target` wrapper, so NucleantThorVG drives ThorVG's wg backend
 //  without importing CWgpu itself.
 //
+// wgpu-native has no wasm build — on WebAssembly the browser's WebGPU is the
+// device, and WgpuContext+Wasm.swift provides this type there.
+#if !os(WASI)
 import Foundation
 // wgpu-native C API: bare-dylib module on macOS, framework module on iOS.
 #if os(iOS)
@@ -383,3 +386,4 @@ public final class WgpuContext: @unchecked Sendable {
         #endif
     }
 }
+#endif

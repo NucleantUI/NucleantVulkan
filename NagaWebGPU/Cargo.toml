@@ -1,0 +1,19 @@
+[package]
+name = "naga_webgpu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "SPIR-V to WGSL for NucleantVulkan's WebGPU stand-in on wasm, built to wasm32-unknown-unknown (see scripts/build_naga_wasm.py)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+naga = { version = "30", default-features = false, features = ["spv-in", "wgsl-out"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
