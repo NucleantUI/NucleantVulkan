@@ -49,7 +49,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     VkRenderPass *pRenderPass) {
     (void)device;
     (void)pAllocator;
-    if (pCreateInfo->attachmentCount > VKW_MAX_COLOR_ATTACHMENTS || pCreateInfo->subpassCount == 0) {
+    if (pCreateInfo->attachmentCount > VKW_MAX_COLOR_ATTACHMENTS + 1 || pCreateInfo->subpassCount == 0) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }
     if (pCreateInfo->subpassCount > 1) {
@@ -57,8 +57,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
         vkw_logf("vkCreateRenderPass: %u subpasses; only the first is rendered on WebGPU", pCreateInfo->subpassCount);
     }
     const VkSubpassDescription *subpass = &pCreateInfo->pSubpasses[0];
-    if (subpass->pDepthStencilAttachment || subpass->inputAttachmentCount || subpass->pResolveAttachments) {
-        vkw_logf("vkCreateRenderPass: depth/input/resolve attachments are not implemented on WebGPU yet");
+    if (subpass->inputAttachmentCount || subpass->pResolveAttachments) {
+        vkw_logf("vkCreateRenderPass: input/resolve attachments are not implemented on WebGPU yet");
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     VkRenderPass pass = calloc(1, sizeof *pass);
@@ -68,7 +68,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
         pass->attachments[i].format = pCreateInfo->pAttachments[i].format;
         pass->attachments[i].loadOp = pCreateInfo->pAttachments[i].loadOp;
         pass->attachments[i].storeOp = pCreateInfo->pAttachments[i].storeOp;
+        pass->attachments[i].stencilLoadOp = pCreateInfo->pAttachments[i].stencilLoadOp;
+        pass->attachments[i].stencilStoreOp = pCreateInfo->pAttachments[i].stencilStoreOp;
     }
+    pass->depthRef = subpass->pDepthStencilAttachment ? subpass->pDepthStencilAttachment->attachment : VK_ATTACHMENT_UNUSED;
     pass->colorCount = subpass->colorAttachmentCount;
     for (uint32_t i = 0; i < subpass->colorAttachmentCount && i < VKW_MAX_COLOR_ATTACHMENTS; i++) {
         pass->colorRefs[i] = subpass->pColorAttachments[i].attachment;
@@ -88,7 +91,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkFramebuffer *pFramebuffer) {
     (void)device;
     (void)pAllocator;
-    if (pCreateInfo->attachmentCount > VKW_MAX_COLOR_ATTACHMENTS) return VK_ERROR_INITIALIZATION_FAILED;
+    if (pCreateInfo->attachmentCount > VKW_MAX_COLOR_ATTACHMENTS + 1) return VK_ERROR_INITIALIZATION_FAILED;
     VkFramebuffer framebuffer = calloc(1, sizeof *framebuffer);
     if (!framebuffer) return VK_ERROR_OUT_OF_HOST_MEMORY;
     framebuffer->attachmentCount = pCreateInfo->attachmentCount;
@@ -146,9 +149,23 @@ static VkResult create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *inf
         }
     }
     if (!hasVertex) return VK_ERROR_INITIALIZATION_FAILED;
-    if (info->pVertexInputState && info->pVertexInputState->vertexBindingDescriptionCount > 0) {
-        vkw_logf("vkCreateGraphicsPipelines: vertex buffers are not implemented on WebGPU yet");
-        return VK_ERROR_FEATURE_NOT_PRESENT;
+    const VkPipelineVertexInputStateCreateInfo *input = info->pVertexInputState;
+    if (input) {
+        if (input->vertexBindingDescriptionCount > NWG_MAX_VERTEX_BINDINGS ||
+            input->vertexAttributeDescriptionCount > NWG_MAX_VERTEX_ATTRIBUTES) {
+            vkw_logf("vkCreateGraphicsPipelines: more than %u vertex bindings or attributes", NWG_MAX_VERTEX_BINDINGS);
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+        desc.bindingCount = input->vertexBindingDescriptionCount;
+        for (uint32_t i = 0; i < desc.bindingCount; i++) {
+            const VkVertexInputBindingDescription *b = &input->pVertexBindingDescriptions[i];
+            desc.bindings[i] = (nwg_vertex_binding_t){ b->binding, b->stride, b->inputRate == VK_VERTEX_INPUT_RATE_INSTANCE };
+        }
+        desc.attributeCount = input->vertexAttributeDescriptionCount;
+        for (uint32_t i = 0; i < desc.attributeCount; i++) {
+            const VkVertexInputAttributeDescription *a = &input->pVertexAttributeDescriptions[i];
+            desc.attributes[i] = (nwg_vertex_attribute_t){ a->location, a->binding, (uint32_t)a->format, a->offset };
+        }
     }
 
     desc.setCount = info->layout->setCount;
@@ -181,6 +198,28 @@ static VkResult create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *inf
         }
     }
 
+    // Depth/stencil: WebGPU wants the state exactly when the pass has the
+    // attachment, with its format.
+    const VkPipelineDepthStencilStateCreateInfo *ds = info->pDepthStencilState;
+    if (pass->depthRef != VK_ATTACHMENT_UNUSED) {
+        desc.depthFormat = (uint32_t)pass->attachments[pass->depthRef].format;
+        desc.depthCompare = (uint32_t)VK_COMPARE_OP_ALWAYS;
+        desc.front = desc.back = (nwg_stencil_face_t){ VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP };
+        desc.stencilReadMask = desc.stencilWriteMask = 0xFF;
+        if (ds) {
+            desc.depthTest = ds->depthTestEnable;
+            desc.depthWrite = ds->depthTestEnable && ds->depthWriteEnable;
+            if (ds->depthTestEnable) desc.depthCompare = (uint32_t)ds->depthCompareOp;
+            desc.stencilTest = ds->stencilTestEnable;
+            if (ds->stencilTestEnable) {
+                desc.front = (nwg_stencil_face_t){ ds->front.compareOp, ds->front.failOp, ds->front.depthFailOp, ds->front.passOp };
+                desc.back = (nwg_stencil_face_t){ ds->back.compareOp, ds->back.failOp, ds->back.depthFailOp, ds->back.passOp };
+                desc.stencilReadMask = ds->front.compareMask;
+                desc.stencilWriteMask = ds->front.writeMask;
+            }
+        }
+    }
+
     uint32_t gpu = nwg_render_pipeline_create(&desc);
     if (!gpu) return VK_ERROR_INITIALIZATION_FAILED;
     VkPipeline pipeline = calloc(1, sizeof *pipeline);
@@ -195,6 +234,14 @@ static VkResult create_graphics_pipeline(const VkGraphicsPipelineCreateInfo *inf
     const VkPipelineViewportStateCreateInfo *viewport = info->pViewportState;
     if (viewport && !pipeline->dynamicViewport && viewport->pViewports) pipeline->viewport = viewport->pViewports[0];
     if (viewport && !pipeline->dynamicScissor && viewport->pScissors) pipeline->scissor = viewport->pScissors[0];
+    pipeline->dynamicStencilReference = has_dynamic_state(info->pDynamicState, VK_DYNAMIC_STATE_STENCIL_REFERENCE);
+    pipeline->dynamicStencilMasks = has_dynamic_state(info->pDynamicState, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK) ||
+                                    has_dynamic_state(info->pDynamicState, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK);
+    pipeline->dynamicBlendConstants = has_dynamic_state(info->pDynamicState, VK_DYNAMIC_STATE_BLEND_CONSTANTS);
+    pipeline->stencilReference = ds && ds->stencilTestEnable ? ds->front.reference : 0;
+    pipeline->stencilCompareMask = desc.stencilReadMask;
+    pipeline->stencilWriteMask = desc.stencilWriteMask;
+    if (info->pColorBlendState) memcpy(pipeline->blendConstants, info->pColorBlendState->blendConstants, sizeof pipeline->blendConstants);
     *pPipeline = pipeline;
     return VK_SUCCESS;
 }

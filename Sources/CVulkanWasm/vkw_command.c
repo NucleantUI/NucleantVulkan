@@ -203,6 +203,62 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     (void)pBufferMemoryBarriers; (void)imageMemoryBarrierCount; (void)pImageMemoryBarriers;
 }
 
+static void set_stencil(VkCommandBuffer commandBuffer, uint32_t which, VkStencilFaceFlags faces, uint32_t value) {
+    vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_SET_STENCIL);
+    if (!cmd) return;
+    cmd->stencil.which = which;
+    cmd->stencil.faces = faces;
+    cmd->stencil.value = value;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t compareMask) {
+    set_stencil(commandBuffer, VKW_STENCIL_COMPARE_MASK, faceMask, compareMask);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t writeMask) {
+    set_stencil(commandBuffer, VKW_STENCIL_WRITE_MASK, faceMask, writeMask);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilReference(VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask, uint32_t reference) {
+    set_stencil(commandBuffer, VKW_STENCIL_REFERENCE, faceMask, reference);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(VkCommandBuffer commandBuffer, const float blendConstants[4]) {
+    vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_SET_BLEND_CONSTANTS);
+    if (cmd) memcpy(cmd->blendConstants, blendConstants, sizeof cmd->blendConstants);
+}
+
+// MARK: - Vertex input
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount, const VkBuffer *pBuffers,
+    const VkDeviceSize *pOffsets) {
+    if (firstBinding + bindingCount > NWG_MAX_VERTEX_BINDINGS) {
+        vkw_logf("vkCmdBindVertexBuffers: bindings beyond %u are not available on WebGPU; ignored", NWG_MAX_VERTEX_BINDINGS);
+        return;
+    }
+    vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_BIND_VERTEX_BUFFERS);
+    if (!cmd) return;
+    cmd->vertexBuffers.first = firstBinding;
+    cmd->vertexBuffers.count = bindingCount;
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        cmd->vertexBuffers.buffers[i] = pBuffers[i];
+        cmd->vertexBuffers.offsets[i] = pOffsets[i];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkIndexType indexType) {
+    if (indexType != VK_INDEX_TYPE_UINT16 && indexType != VK_INDEX_TYPE_UINT32) {
+        vkw_logf("vkCmdBindIndexBuffer: index type %d has no WebGPU equivalent; ignored", (int)indexType);
+        return;
+    }
+    vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_BIND_INDEX_BUFFER);
+    if (!cmd) return;
+    cmd->indexBuffer.buffer = buffer;
+    cmd->indexBuffer.offset = offset;
+    cmd->indexBuffer.type = indexType;
+}
+
 // MARK: - Draw / dispatch
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
@@ -213,6 +269,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     cmd->draw.instanceCount = instanceCount;
     cmd->draw.firstVertex = firstVertex;
     cmd->draw.firstInstance = firstInstance;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset,
+    uint32_t firstInstance) {
+    vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_DRAW_INDEXED);
+    if (!cmd) return;
+    cmd->drawIndexed.indexCount = indexCount;
+    cmd->drawIndexed.instanceCount = instanceCount;
+    cmd->drawIndexed.firstIndex = firstIndex;
+    cmd->drawIndexed.vertexOffset = vertexOffset;
+    cmd->drawIndexed.firstInstance = firstInstance;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
@@ -305,6 +373,20 @@ VKAPI_ATTR void VKAPI_CALL vkCmdClearColorImage(
         cmd->clear.image = image;
         cmd->clear.color = *pColor;
         cmd->clear.range = pRanges[i];
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(
+    VkCommandBuffer commandBuffer, uint32_t attachmentCount, const VkClearAttachment *pAttachments, uint32_t rectCount,
+    const VkClearRect *pRects) {
+    if (attachmentCount > VKW_MAX_COLOR_ATTACHMENTS + 1) attachmentCount = VKW_MAX_COLOR_ATTACHMENTS + 1;
+    // One command per rect: WebGPU clears them one at a time anyway.
+    for (uint32_t r = 0; r < rectCount; r++) {
+        vkw_cmd_t *cmd = append(commandBuffer, VKW_CMD_CLEAR_ATTACHMENTS);
+        if (!cmd) return;
+        cmd->clearAttachments.count = attachmentCount;
+        for (uint32_t i = 0; i < attachmentCount; i++) cmd->clearAttachments.attachments[i] = pAttachments[i];
+        cmd->clearAttachments.rect = pRects[r];
     }
 }
 

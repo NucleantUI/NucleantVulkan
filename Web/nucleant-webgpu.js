@@ -36,7 +36,8 @@ const OP = {
   SET_SCISSOR: 6, DRAW_DATA: 7, DRAW: 8, DRAW_INDIRECT: 9, BEGIN_COMPUTE_PASS: 10,
   END_COMPUTE_PASS: 11, DISPATCH: 12, COPY_BUFFER_TO_BUFFER: 13, COPY_BUFFER_TO_TEXTURE: 14,
   COPY_TEXTURE_TO_BUFFER: 15, COPY_TEXTURE_TO_TEXTURE: 16, CLEAR_TEXTURE: 17, BLIT_TEXTURE: 18,
-  READBACK: 19,
+  READBACK: 19, SET_VERTEX_BUFFER: 20, SET_INDEX_BUFFER: 21, DRAW_INDEXED: 22, SET_STENCIL_REFERENCE: 23,
+  SET_STENCIL_MASKS: 24, SET_BLEND_CONSTANT: 25, CLEAR_ATTACHMENTS: 26,
 };
 
 const DESC = { SAMPLER: 1, COMBINED: 2, SAMPLED_IMAGE: 3, STORAGE_IMAGE: 4, UNIFORM_BUFFER: 5, STORAGE_BUFFER: 6 };
@@ -68,6 +69,45 @@ const BLEND_FACTORS = [
   'src-alpha-saturated',
 ];
 const BLEND_OPS = ['add', 'subtract', 'reverse-subtract', 'min', 'max'];
+const STENCIL_OPS = ['keep', 'zero', 'replace', 'increment-clamp', 'decrement-clamp', 'invert', 'increment-wrap', 'decrement-wrap'];
+const STENCIL_FORMATS = new Set(['depth24plus-stencil8', 'depth32float-stencil8', 'stencil8']);
+
+// VkFormat -> GPUVertexFormat. WebGPU has no 3-component 8/16-bit formats and
+// no *SCALED ones (integers read as floats).
+const VERTEX_FORMATS = {
+  9: 'unorm8', 10: 'snorm8', 13: 'uint8', 14: 'sint8',
+  16: 'unorm8x2', 17: 'snorm8x2', 20: 'uint8x2', 21: 'sint8x2',
+  37: 'unorm8x4', 38: 'snorm8x4', 41: 'uint8x4', 42: 'sint8x4', 44: 'unorm8x4-bgra',
+  64: 'unorm10-10-10-2',
+  70: 'unorm16', 71: 'snorm16', 74: 'uint16', 75: 'sint16', 76: 'float16',
+  77: 'unorm16x2', 78: 'snorm16x2', 81: 'uint16x2', 82: 'sint16x2', 83: 'float16x2',
+  91: 'unorm16x4', 92: 'snorm16x4', 95: 'uint16x4', 96: 'sint16x4', 97: 'float16x4',
+  98: 'uint32', 99: 'sint32', 100: 'float32',
+  101: 'uint32x2', 102: 'sint32x2', 103: 'float32x2',
+  104: 'uint32x3', 105: 'sint32x3', 106: 'float32x3',
+  107: 'uint32x4', 108: 'sint32x4', 109: 'float32x4',
+};
+
+// vkCmdClearAttachments inside a pass: a triangle over the target, cut to
+// the rect by the scissor. Colour comes from the blend constant
+// (1 * constant + 0 * dst), depth from the viewport's depth range (z = 0
+// lands on minDepth = maxDepth). With no colour attachments there is no
+// fragment stage.
+const CLEAR_SHADER = (colorCount) => /* wgsl */ `
+@vertex fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u)) * 2.0 - 1.0;
+  return vec4<f32>(p, 0.0, 1.0);
+}
+` + (colorCount ? `
+struct Out { ${Array.from({ length: colorCount }, (_, i) => `@location(${i}) c${i}: vec4<f32>,`).join(' ')} }
+@fragment fn fs() -> Out {
+  var out: Out;
+  ${Array.from({ length: colorCount }, (_, i) => `out.c${i} = vec4<f32>(1.0);`).join(' ')}
+  return out;
+}` : '');
+
+// Word offsets in nwg_render_pipeline_desc_t (vkw_internal.h).
+const DESC_BINDINGS = 87, DESC_ATTRIBUTES = 136, DESC_DEPTH = 201;
 
 const STAGE_CODE = { vertex: 0, fragment: 1, compute: 2 };
 
@@ -155,6 +195,7 @@ class Bridge {
     this.setKeys = new Map();         // setId -> Set of keys above
     this.layoutCache = new Map();     // layout key -> GPUBindGroupLayout
     this.emptyGroups = new Map();     // GPUBindGroupLayout -> GPUBindGroup
+    this.clearPipelines = new Map();  // pass attachments + what is cleared -> GPURenderPipeline
     this.blitPipelines = new Map();
     this.warned = new Set();
 
@@ -230,6 +271,7 @@ class Bridge {
           alphaMode: premultiplied ? 'premultiplied' : 'opaque',
         });
         surface.configured = true;
+        surface.format = FORMATS[format][0];
       },
       surfaceUnconfigure: (id) => {
         const surface = this.get(id);
@@ -391,15 +433,16 @@ class Bridge {
     const u = (i) => v.getUint32(ptr + i * 4, true);
     if (u(0) === 0) return this.add({ kind: 'surfaceView', surface: u(1) });
     const texture = this.get(u(0));
+    const viewFormat = FORMATS[u(2)]?.[0] ?? texture.format;
     const view = texture.texture.createView({
-      format: FORMATS[u(2)]?.[0] ?? texture.format,
+      format: viewFormat,
       dimension: VIEW_DIMENSIONS[u(3)] ?? '2d',
       baseMipLevel: u(4),
       mipLevelCount: u(5),
       baseArrayLayer: u(6),
       arrayLayerCount: u(7),
     });
-    return this.add({ kind: 'view', view });
+    return this.add({ kind: 'view', view, format: viewFormat, samples: texture.texture.sampleCount });
   }
 
   samplerCreate(ptr) {
@@ -554,9 +597,30 @@ class Bridge {
       this.error('primitive topology', u(10), 'has no WebGPU equivalent');
       return 0;
     }
+
+    // Vertex input: WebGPU numbers its buffers by slot, Vulkan by binding —
+    // the bindings in order are the slots.
+    const bindings = [];
+    for (let b = 0; b < u(DESC_BINDINGS); b++) {
+      const base = DESC_BINDINGS + 1 + b * 3;
+      bindings.push({ binding: u(base), stride: u(base + 1), perInstance: u(base + 2) });
+    }
+    bindings.sort((a, b) => a.binding - b.binding);
+    const buffers = bindings.map((b) => ({ arrayStride: b.stride, stepMode: b.perInstance ? 'instance' : 'vertex', attributes: [] }));
+    for (let a = 0; a < u(DESC_ATTRIBUTES); a++) {
+      const base = DESC_ATTRIBUTES + 1 + a * 4;
+      const format = VERTEX_FORMATS[u(base + 2)];
+      const slot = bindings.findIndex((b) => b.binding === u(base + 1));
+      if (!format || slot < 0) {
+        this.error(`vertex attribute ${u(base)}: VkFormat ${u(base + 2)} has no WebGPU vertex format`);
+        return 0;
+      }
+      buffers[slot].attributes.push({ shaderLocation: u(base), format, offset: u(base + 3) });
+    }
+
     const descriptor = {
       layout: layout.layout,
-      vertex: { module: vertex.module, entryPoint: vertex.entryPoint },
+      vertex: { module: vertex.module, entryPoint: vertex.entryPoint, buffers },
       primitive: {
         topology,
         cullMode: ['none', 'front', 'back', 'none'][cull] ?? 'none',
@@ -565,8 +629,90 @@ class Bridge {
       multisample: { count: u(13) || 1 },
     };
     if (fragment) descriptor.fragment = { module: fragment.module, entryPoint: fragment.entryPoint, targets };
+
+    // Depth/stencil, exactly when the pass has the attachment.
+    const depthFormat = FORMATS[u(DESC_DEPTH)]?.[0];
+    let stencil = false;
+    if (depthFormat) {
+      const depthStencil = {
+        format: depthFormat,
+        depthWriteEnabled: !!u(DESC_DEPTH + 2),
+        depthCompare: u(DESC_DEPTH + 1) ? COMPARE[u(DESC_DEPTH + 3)] : 'always',
+      };
+      if (STENCIL_FORMATS.has(depthFormat) && u(DESC_DEPTH + 4)) {
+        stencil = true;
+        const face = (base) => ({
+          compare: COMPARE[u(base)], failOp: STENCIL_OPS[u(base + 1)], depthFailOp: STENCIL_OPS[u(base + 2)], passOp: STENCIL_OPS[u(base + 3)],
+        });
+        depthStencil.stencilFront = face(DESC_DEPTH + 5);
+        depthStencil.stencilBack = face(DESC_DEPTH + 9);
+        depthStencil.stencilReadMask = u(DESC_DEPTH + 13);
+        depthStencil.stencilWriteMask = u(DESC_DEPTH + 14);
+      }
+      descriptor.depthStencil = depthStencil;
+    }
     const pipeline = this.device.createRenderPipeline(descriptor);
-    return this.add({ kind: 'renderPipeline', pipeline, setCount, ...layout });
+    return this.add({
+      kind: 'renderPipeline', pipeline, setCount, ...layout, descriptor, stencil,
+      strip: topology.endsWith('-strip'), vertexSlots: bindings.map((b) => b.binding), variants: new Map(),
+    });
+  }
+
+  /**
+   * The GPURenderPipeline for a draw. WebGPU bakes into the pipeline what
+   * Vulkan sets per draw: the stencil compare/write masks (dynamic state) and,
+   * for an indexed strip, the index format its restarts are read in. Each
+   * combination in use gets a pipeline of its own, made once.
+   */
+  pipelineVariant(pipeline, masks, indexFormat) {
+    const stencil = pipeline.stencil && masks
+      && (masks[0] !== pipeline.descriptor.depthStencil.stencilReadMask || masks[1] !== pipeline.descriptor.depthStencil.stencilWriteMask);
+    const strip = pipeline.strip && indexFormat;
+    if (!stencil && !strip) return pipeline.pipeline;
+    const key = `${stencil ? masks.join(',') : ''}|${strip ? indexFormat : ''}`;
+    let variant = pipeline.variants.get(key);
+    if (!variant) {
+      const descriptor = { ...pipeline.descriptor };
+      if (stencil) descriptor.depthStencil = { ...descriptor.depthStencil, stencilReadMask: masks[0], stencilWriteMask: masks[1] };
+      if (strip) descriptor.primitive = { ...descriptor.primitive, stripIndexFormat: indexFormat };
+      variant = this.device.createRenderPipeline(descriptor);
+      pipeline.variants.set(key, variant);
+    }
+    return variant;
+  }
+
+  /** The pipeline vkCmdClearAttachments draws with in a pass of `info`'s attachments. */
+  clearPipeline(info, colorMask, depth, stencil) {
+    const key = `${info.colorFormats.join(',')}|${info.depthFormat ?? ''}|${info.samples}|${colorMask}|${depth}|${stencil}`;
+    let pipeline = this.clearPipelines.get(key);
+    if (pipeline) return pipeline;
+    const colorCount = info.colorFormats.length;
+    const module = this.device.createShaderModule({ code: CLEAR_SHADER(colorCount), label: 'vkCmdClearAttachments' });
+    const constant = { srcFactor: 'constant', dstFactor: 'zero', operation: 'add' };
+    const descriptor = {
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [] }),
+      vertex: { module, entryPoint: 'vs' },
+      primitive: { topology: 'triangle-list' },
+      multisample: { count: info.samples },
+    };
+    if (colorCount) {
+      descriptor.fragment = {
+        module, entryPoint: 'fs',
+        targets: info.colorFormats.map((format, i) => format
+          ? { format, writeMask: colorMask & (1 << i) ? GPUColorWrite.ALL : 0, blend: { color: constant, alpha: constant } }
+          : null),
+      };
+    }
+    if (info.depthFormat) {
+      descriptor.depthStencil = { format: info.depthFormat, depthWriteEnabled: depth, depthCompare: 'always' };
+      if (STENCIL_FORMATS.has(info.depthFormat)) {
+        const face = { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: stencil ? 'replace' : 'keep' };
+        Object.assign(descriptor.depthStencil, { stencilFront: face, stencilBack: face, stencilWriteMask: stencil ? 0xff : 0 });
+      }
+    }
+    pipeline = this.device.createRenderPipeline(descriptor);
+    this.clearPipelines.set(key, pipeline);
+    return pipeline;
   }
 
   computePipelineCreate(ptr) {
@@ -675,19 +821,68 @@ class Bridge {
 
     // Vulkan command-buffer state (it survives render passes) and what the
     // current WebGPU pass has actually been given (it doesn't).
-    const logical = { pipeline: [null, null], sets: [[], []], drawData: [0, 0] };
+    const logical = {
+      pipeline: [null, null], sets: [[], []], drawData: [0, 0],
+      vertexBuffers: [], index: null, stencilMasks: null, stencilReference: 0, blendConstant: [0, 0, 0, 0],
+    };
     let pass = null;
+    let passInfo = null;
     let applied = null;
-    const resetApplied = () => { applied = { pipeline: null, groups: [], draw: -1 }; };
+    const resetApplied = () => {
+      applied = { pipeline: null, gpuPipeline: null, groups: [], draw: -1, vertex: [], index: null, stencilReference: null, blendConstant: null };
+    };
+    const formatOfView = (id) => {
+      const object = this.get(id);
+      return object?.kind === 'view' ? object.format : this.get(object?.surface)?.format;
+    };
 
-    const apply = (bindPoint, kind) => {
+    const apply = (bindPoint, kind, indexed = false) => {
       const pipeline = this.get(logical.pipeline[bindPoint]);
       if (!pipeline || pipeline.kind !== kind) return false;
+      const indexFormat = indexed ? logical.index?.format : undefined;
+      if (indexed && !indexFormat) {
+        this.warnOnce('no-index-buffer', 'vkCmdDrawIndexed without an index buffer bound; draw skipped');
+        return false;
+      }
+      const gpuPipeline = kind === 'renderPipeline' ? this.pipelineVariant(pipeline, logical.stencilMasks, indexFormat) : pipeline.pipeline;
+      if (applied.gpuPipeline !== gpuPipeline) {
+        pass.setPipeline(gpuPipeline);
+        applied.gpuPipeline = gpuPipeline;
+      }
       if (applied.pipeline !== pipeline) {
-        pass.setPipeline(pipeline.pipeline);
         applied.pipeline = pipeline;
         applied.groups = [];
         applied.draw = -1;
+      }
+      if (kind === 'renderPipeline') {
+        for (let slot = 0; slot < pipeline.vertexSlots.length; slot++) {
+          const bound = logical.vertexBuffers[pipeline.vertexSlots[slot]];
+          const buffer = this.get(bound?.buffer);
+          if (!buffer) {
+            this.warnOnce(`no-vertex-buffer:${pipeline.vertexSlots[slot]}`,
+                          `no vertex buffer bound at binding ${pipeline.vertexSlots[slot]}; draw skipped`);
+            return false;
+          }
+          const current = applied.vertex[slot];
+          if (!current || current.buffer !== bound.buffer || current.offset !== bound.offset) {
+            pass.setVertexBuffer(slot, buffer.buffer, bound.offset);
+            applied.vertex[slot] = bound;
+          }
+        }
+        if (indexed && applied.index !== logical.index) {
+          const buffer = this.get(logical.index.buffer);
+          if (!buffer) return false;
+          pass.setIndexBuffer(buffer.buffer, logical.index.format, logical.index.offset);
+          applied.index = logical.index;
+        }
+        if (passInfo?.stencil && applied.stencilReference !== logical.stencilReference) {
+          pass.setStencilReference(logical.stencilReference);
+          applied.stencilReference = logical.stencilReference;
+        }
+        if (applied.blendConstant !== logical.blendConstant) {
+          pass.setBlendConstant(logical.blendConstant);
+          applied.blendConstant = logical.blendConstant;
+        }
       }
       for (let g = 0; g < pipeline.setCount; g++) {
         const group = this.bindGroupFor(pipeline.groupLayouts[g], logical.sets[bindPoint][g]);
@@ -718,14 +913,35 @@ class Bridge {
         case OP.BEGIN_RENDER_PASS: {
           const count = next();
           const colorAttachments = [];
+          const colorFormats = [];
+          let samples = 0;
           for (let a = 0; a < count; a++) {
             const viewId = next(), load = next(), store = next();
             const clearValue = [floats[i], floats[i + 1], floats[i + 2], floats[i + 3]];
             i += 4;
             const view = viewId ? this.resolveView(viewId) : null;
             colorAttachments.push(view ? { view, loadOp: load ? 'clear' : 'load', storeOp: store ? 'discard' : 'store', clearValue } : null);
+            colorFormats.push(view ? formatOfView(viewId) : null);
+            if (view && samples === 0) samples = this.get(viewId)?.samples ?? 1;
           }
-          pass = encoder.beginRenderPass({ colorAttachments });
+          const depthId = next(), depthLoad = next(), depthStore = next(), depthClear = floats[i++];
+          const stencilLoad = next(), stencilStore = next(), stencilClear = next();
+          const width = next(), height = next();
+          const descriptor = { colorAttachments };
+          const depthFormat = depthId ? formatOfView(depthId) : null;
+          if (depthId) {
+            const attachment = {
+              view: this.resolveView(depthId),
+              depthLoadOp: depthLoad ? 'clear' : 'load', depthStoreOp: depthStore ? 'discard' : 'store', depthClearValue: depthClear,
+            };
+            if (STENCIL_FORMATS.has(depthFormat)) {
+              Object.assign(attachment, { stencilLoadOp: stencilLoad ? 'clear' : 'load', stencilStoreOp: stencilStore ? 'discard' : 'store', stencilClearValue: stencilClear });
+            }
+            descriptor.depthStencilAttachment = attachment;
+            if (samples === 0) samples = this.get(depthId)?.samples ?? 1;
+          }
+          pass = encoder.beginRenderPass(descriptor);
+          passInfo = { colorFormats, depthFormat, stencil: STENCIL_FORMATS.has(depthFormat), samples: samples || 1, width, height };
           resetApplied();
           break;
         }
@@ -762,6 +978,61 @@ class Bridge {
         case OP.DRAW: {
           const vertexCount = next(), instanceCount = next(), firstVertex = next(), firstInstance = next();
           if (apply(0, 'renderPipeline')) pass.draw(vertexCount, instanceCount, firstVertex, firstInstance);
+          break;
+        }
+        case OP.DRAW_INDEXED: {
+          const indexCount = next(), instanceCount = next(), firstIndex = next(), baseVertex = next() | 0, firstInstance = next();
+          if (apply(0, 'renderPipeline', true)) pass.drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+          break;
+        }
+        case OP.SET_VERTEX_BUFFER: {
+          const binding = next(), buffer = next(), offset = next();
+          logical.vertexBuffers[binding] = { buffer, offset };
+          break;
+        }
+        case OP.SET_INDEX_BUFFER: {
+          const buffer = next(), offset = next(), wide = next();
+          logical.index = { buffer, offset, format: wide ? 'uint32' : 'uint16' };
+          break;
+        }
+        case OP.SET_STENCIL_REFERENCE:
+          logical.stencilReference = next();
+          break;
+        case OP.SET_STENCIL_MASKS:
+          logical.stencilMasks = [next(), next()];
+          break;
+        case OP.SET_BLEND_CONSTANT:
+          logical.blendConstant = [floats[i], floats[i + 1], floats[i + 2], floats[i + 3]];
+          i += 4;
+          break;
+        case OP.CLEAR_ATTACHMENTS: {
+          const x = next(), y = next(), width = next(), height = next(), colorCount = next();
+          const colors = [];
+          for (let c = 0; c < colorCount; c++) {
+            colors.push({ index: next(), value: [floats[i], floats[i + 1], floats[i + 2], floats[i + 3]] });
+            i += 4;
+          }
+          const clearDepth = next() === 1, depth = floats[i++], clearStencil = next() === 1, stencil = next();
+          if (!pass || !passInfo) break;
+          // One draw per colour (each its own blend constant); depth and
+          // stencil go with the first.
+          const draws = colors.filter((c) => passInfo.colorFormats[c.index]).map((c) => ({ mask: 1 << c.index, value: c.value, depth: false, stencil: false }));
+          const ds = { depth: clearDepth && !!passInfo.depthFormat, stencil: clearStencil && passInfo.stencil };
+          if (ds.depth || ds.stencil) {
+            if (draws.length) Object.assign(draws[0], ds);
+            else draws.push({ mask: 0, value: [0, 0, 0, 0], ...ds });
+          }
+          for (const draw of draws) {
+            pass.setPipeline(this.clearPipeline(passInfo, draw.mask, draw.depth, draw.stencil));
+            pass.setViewport(0, 0, passInfo.width, passInfo.height, draw.depth ? depth : 0, draw.depth ? depth : 1);
+            pass.setScissorRect(x, y, width, height);
+            pass.setBlendConstant(draw.value);
+            if (draw.stencil) pass.setStencilReference(stencil);
+            pass.draw(3);
+          }
+          // What it changed is given again before the next draw (the C side
+          // re-sends the viewport and scissor).
+          Object.assign(applied, { pipeline: null, gpuPipeline: null, groups: [], draw: -1, stencilReference: null, blendConstant: null });
           break;
         }
         case OP.DRAW_INDIRECT: {

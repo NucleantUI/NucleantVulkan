@@ -12,6 +12,8 @@
 //!   buffer at `@group(draw_group) @binding(1)`. The host fills one slice of a
 //!   per-submit buffer per draw/dispatch and binds it with a dynamic offset —
 //!   what `vkCmdPushConstants` does per draw.
+//! * A vertex shader's point size is dropped: WebGPU draws every point one
+//!   pixel wide and WGSL has no point size to write (`drop_point_size`).
 //! * Vulkan lets a viewport extend past the framebuffer; WebGPU requires it
 //!   inside. A vertex entry point gets its clip-space position remapped by a
 //!   per-draw `vec4<f32>` at `@group(draw_group) @binding(0)`, so the host can
@@ -90,6 +92,9 @@ fn convert(words: &[u32], stage: ShaderStage, entry: &str, draw_group: u32) -> R
     module.entry_points.clear();
     module.entry_points.push(ep);
 
+    if stage == ShaderStage::Vertex {
+        drop_point_size(&mut module);
+    }
     let push_constant = lower_push_constants(&mut module, draw_group)?;
     let viewport_fix = if stage == ShaderStage::Vertex { add_viewport_fix(&mut module, draw_group)? } else { false };
 
@@ -234,6 +239,50 @@ fn storage_format(format: StorageFormat) -> Result<&'static str, String> {
         StorageFormat::Rgba32Float => "rgba32float",
         other => return Err(format!("storage format {other:?} has no WebGPU equivalent")),
     })
+}
+
+/// Removes the point size from what the vertex entry point returns. Vulkan
+/// leaves a point's size undefined unless the shader writes it, so pipelines
+/// that draw points write one — while WebGPU draws every point one pixel wide
+/// and WGSL has no builtin to write it to. naga already drops a declared
+/// point size the shader never writes; this drops a written one too: the
+/// member leaves the returned struct, and the block the shader writes it
+/// through (glslang's `gl_PerVertex`) keeps the member, without the builtin.
+fn drop_point_size(module: &mut Module) {
+    let is_point_size = |member: &naga::StructMember| matches!(member.binding, Some(Binding::BuiltIn(BuiltIn::PointSize)));
+    let function = &mut module.entry_points[0].function;
+    let returned = function.result.as_ref().map(|result| result.ty);
+    let structs: Vec<_> = module
+        .types
+        .iter()
+        .filter(|(_, ty)| matches!(ty.inner, TypeInner::Struct { ref members, .. } if members.iter().any(is_point_size)))
+        .map(|(handle, _)| handle)
+        .collect();
+    for handle in structs {
+        let mut stripped = module.types[handle].clone();
+        let TypeInner::Struct { ref mut members, .. } = stripped.inner else { continue };
+        if Some(handle) == returned {
+            let kept: Vec<bool> = members.iter().map(|member| !is_point_size(member)).collect();
+            members.retain(|member| !is_point_size(member));
+            // The value the entry point returns, built member by member.
+            for (_, expression) in function.expressions.iter_mut() {
+                if let Expression::Compose { ty, ref mut components } = *expression {
+                    if ty == handle {
+                        let mut index = 0;
+                        components.retain(|_| {
+                            index += 1;
+                            kept[index - 1]
+                        });
+                    }
+                }
+            }
+        } else {
+            for member in members.iter_mut().filter(|member| is_point_size(member)) {
+                member.binding = None;
+            }
+        }
+        module.types.replace(handle, stripped);
+    }
 }
 
 /// Moves the push-constant block into a read-only storage buffer of the

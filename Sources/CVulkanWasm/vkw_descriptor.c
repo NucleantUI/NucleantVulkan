@@ -136,6 +136,21 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorPool(
     free(descriptorPool);
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(
+    VkDevice device, VkDescriptorPool descriptorPool, VkDescriptorPoolResetFlags flags) {
+    (void)device;
+    (void)flags;
+    // Every set allocated from the pool goes back to it.
+    for (VkDescriptorSet set = descriptorPool->sets; set;) {
+        VkDescriptorSet next = set->nextInPool;
+        free_set(set);
+        set = next;
+    }
+    descriptorPool->sets = NULL;
+    descriptorPool->liveSets = 0;
+    return VK_SUCCESS;
+}
+
 static uint32_t descriptor_kind(VkDescriptorType type) {
     switch (type) {
     case VK_DESCRIPTOR_TYPE_SAMPLER:                return NWG_DESC_SAMPLER;

@@ -85,6 +85,26 @@ typedef struct nwg_color_target {
     uint32_t writeMask;       // VkColorComponentFlags (same bit order as GPUColorWrite)
 } nwg_color_target_t;
 
+#define NWG_MAX_VERTEX_BINDINGS   16
+#define NWG_MAX_VERTEX_ATTRIBUTES 16
+
+typedef struct nwg_vertex_binding {
+    uint32_t binding;         // the Vulkan binding number
+    uint32_t stride;
+    uint32_t perInstance;
+} nwg_vertex_binding_t;
+
+typedef struct nwg_vertex_attribute {
+    uint32_t location, binding;
+    uint32_t format;          // VkFormat
+    uint32_t offset;
+} nwg_vertex_attribute_t;
+
+typedef struct nwg_stencil_face {
+    uint32_t compare;         // VkCompareOp
+    uint32_t fail, depthFail, pass;   // VkStencilOp
+} nwg_stencil_face_t;
+
 typedef struct nwg_render_pipeline_desc {
     nwg_stage_t        vertex;
     nwg_stage_t        fragment;
@@ -96,6 +116,16 @@ typedef struct nwg_render_pipeline_desc {
     uint32_t           sampleCount;
     uint32_t           colorCount;
     nwg_color_target_t colors[8];
+    uint32_t               bindingCount;
+    nwg_vertex_binding_t   bindings[NWG_MAX_VERTEX_BINDINGS];
+    uint32_t               attributeCount;
+    nwg_vertex_attribute_t attributes[NWG_MAX_VERTEX_ATTRIBUTES];
+    uint32_t           depthFormat;     // VkFormat of the subpass's depth/stencil attachment, 0 = none
+    uint32_t           depthTest, depthWrite;
+    uint32_t           depthCompare;    // VkCompareOp
+    uint32_t           stencilTest;
+    nwg_stencil_face_t front, back;
+    uint32_t           stencilReadMask, stencilWriteMask;  // the static ones; dynamic masks come per draw
 } nwg_render_pipeline_desc_t;
 
 typedef struct nwg_compute_pipeline_desc {
@@ -150,7 +180,9 @@ NWG_IMPORT(queueWaitSerial)       uint32_t nwg_queue_wait_serial(uint32_t serial
 // MARK: - Command stream
 
 enum {
-    NWG_OP_BEGIN_RENDER_PASS     = 1,  // count, {view, loadOp, storeOp, r, g, b, a} * count
+    NWG_OP_BEGIN_RENDER_PASS     = 1,  // count, {view, loadOp, storeOp, r, g, b, a} * count,
+                                       // depthView (0 = none), depthLoad, depthStore, depth (f32),
+                                       // stencilLoad, stencilStore, stencil, width, height
     NWG_OP_END_RENDER_PASS       = 2,
     NWG_OP_SET_PIPELINE          = 3,  // bindPoint, pipeline
     NWG_OP_BIND_SET              = 4,  // bindPoint, index, set, version, count, {binding, type, a, b, c} * count
@@ -169,6 +201,14 @@ enum {
     NWG_OP_CLEAR_TEXTURE         = 17, // texture, mip, layer, r, g, b, a (f32 bits)
     NWG_OP_BLIT_TEXTURE          = 18, // src, srcMip, srcLayer, x0, y0, x1, y1, dst, dstMip, dstLayer, x0, y0, x1, y1, filter
     NWG_OP_READBACK              = 19, // buffer, offset, size, memory, host pointer
+    NWG_OP_SET_VERTEX_BUFFER     = 20, // binding (Vulkan's), buffer, offset
+    NWG_OP_SET_INDEX_BUFFER      = 21, // buffer, offset, uint32 (0 = 16-bit indices)
+    NWG_OP_DRAW_INDEXED          = 22, // indexCount, instanceCount, firstIndex, vertexOffset (i32), firstInstance
+    NWG_OP_SET_STENCIL_REFERENCE = 23, // reference
+    NWG_OP_SET_STENCIL_MASKS     = 24, // compareMask, writeMask
+    NWG_OP_SET_BLEND_CONSTANT    = 25, // r, g, b, a (f32 bits)
+    NWG_OP_CLEAR_ATTACHMENTS     = 26, // x, y, w, h, colorCount, {attachment, r, g, b, a} * colorCount,
+                                       // clearDepth, depth (f32), clearStencil, stencil
 };
 
 enum {
@@ -328,18 +368,21 @@ typedef struct vkw_attachment {
     VkFormat            format;
     VkAttachmentLoadOp  loadOp;
     VkAttachmentStoreOp storeOp;
+    VkAttachmentLoadOp  stencilLoadOp;
+    VkAttachmentStoreOp stencilStoreOp;
 } vkw_attachment_t;
 
 struct VkRenderPass_T {
     uint32_t         attachmentCount;
-    vkw_attachment_t attachments[VKW_MAX_COLOR_ATTACHMENTS];
+    vkw_attachment_t attachments[VKW_MAX_COLOR_ATTACHMENTS + 1];
     uint32_t         colorCount;                          // subpass 0
     uint32_t         colorRefs[VKW_MAX_COLOR_ATTACHMENTS];  // attachment index or VK_ATTACHMENT_UNUSED
+    uint32_t         depthRef;                            // attachment index or VK_ATTACHMENT_UNUSED
 };
 
 struct VkFramebuffer_T {
     uint32_t    attachmentCount;
-    VkImageView attachments[VKW_MAX_COLOR_ATTACHMENTS];
+    VkImageView attachments[VKW_MAX_COLOR_ATTACHMENTS + 1];
     uint32_t    width, height, layers;
 };
 
@@ -350,6 +393,10 @@ struct VkPipeline_T {
     int        dynamicViewport, dynamicScissor;
     VkViewport viewport;
     VkRect2D   scissor;
+    // State Vulkan takes from the pipeline unless it is dynamic.
+    int        dynamicStencilReference, dynamicStencilMasks, dynamicBlendConstants;
+    uint32_t   stencilReference, stencilCompareMask, stencilWriteMask;
+    float      blendConstants[4];
 };
 
 struct VkCommandPool_T {
@@ -395,7 +442,15 @@ typedef enum vkw_cmd_type {
     VKW_CMD_COPY_IMAGE,
     VKW_CMD_BLIT_IMAGE,
     VKW_CMD_CLEAR_COLOR_IMAGE,
+    VKW_CMD_BIND_VERTEX_BUFFERS,
+    VKW_CMD_BIND_INDEX_BUFFER,
+    VKW_CMD_DRAW_INDEXED,
+    VKW_CMD_SET_STENCIL,
+    VKW_CMD_SET_BLEND_CONSTANTS,
+    VKW_CMD_CLEAR_ATTACHMENTS,
 } vkw_cmd_type_t;
+
+enum { VKW_STENCIL_COMPARE_MASK, VKW_STENCIL_WRITE_MASK, VKW_STENCIL_REFERENCE };
 
 typedef struct vkw_cmd {
     vkw_cmd_type_t type;
@@ -422,6 +477,20 @@ typedef struct vkw_cmd {
         struct { VkImage src, dst; VkImageCopy region; } copyImage;
         struct { VkImage src, dst; VkImageBlit region; VkFilter filter; } blit;
         struct { VkImage image; VkClearColorValue color; VkImageSubresourceRange range; } clear;
+        struct {
+            uint32_t first, count;
+            VkBuffer buffers[NWG_MAX_VERTEX_BINDINGS];
+            uint64_t offsets[NWG_MAX_VERTEX_BINDINGS];
+        } vertexBuffers;
+        struct { VkBuffer buffer; uint64_t offset; VkIndexType type; } indexBuffer;
+        struct { uint32_t indexCount, instanceCount, firstIndex; int32_t vertexOffset; uint32_t firstInstance; } drawIndexed;
+        struct { uint32_t which; VkStencilFaceFlags faces; uint32_t value; } stencil;
+        float blendConstants[4];
+        struct {
+            uint32_t          count;
+            VkClearAttachment attachments[VKW_MAX_COLOR_ATTACHMENTS + 1];
+            VkClearRect       rect;
+        } clearAttachments;
     };
 } vkw_cmd_t;
 

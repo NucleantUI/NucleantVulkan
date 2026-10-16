@@ -14,6 +14,7 @@ import Observation
 import CVulkan
 import VulkanCore
 import NucleantShader
+import WASILibc
 @testable import NucleantVulkan
 
 @Suite(.serialized)
@@ -127,6 +128,278 @@ struct WebGPUStandInTests {
         #expect(rgba(pixels, 32, 15, 0) == [255, 0, 0, 255])
         #expect(rgba(pixels, 32, 16, 15) == [0, 0, 255, 255])
         #expect(rgba(pixels, 32, 31, 8) == [0, 0, 255, 255])
+    }
+
+    // MARK: Vertex input, depth/stencil, dynamic state
+
+    @Test func indexedDrawsReadVertexAndIndexBuffers() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try ColorTarget(core, width: 32, height: 16)
+        defer { target.destroy(core) }
+        // Two quads: the left half red, the right half blue. Positions at
+        // binding 0, colours at binding 3 — bindings, not WebGPU's slots.
+        let positions: [Float] = [-1, -1, 0,  0, -1, 0,  -1, 1, 0,  0, 1, 0,
+                                   0, -1, 0,  1, -1, 0,   0, 1, 0,  1, 1, 0]
+        let colors: [UInt8] = [255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+                               0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255]
+        let shortIndices: [UInt16] = [0, 1, 2, 2, 1, 3]
+        let longIndices: [UInt32] = [0, 1, 2, 2, 1, 3]
+        let buffers = [
+            upload(core, positions, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT), upload(core, colors, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT),
+            upload(core, shortIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT), upload(core, longIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT),
+        ]
+        defer { buffers.forEach { $0.destroy(device: core.device) } }
+        let draw = try TestPipeline(core, renderPass: target.pass.renderPass!, colorShaders())
+        defer { draw.destroy(core) }
+
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            draw.bind(cmd, width: 32, height: 16)
+            var vertexBuffers: [VkBuffer?] = [buffers[0].buffer, buffers[1].buffer]
+            var offsets: [VkDeviceSize] = [0, 0]
+            vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffers[0], &offsets[0])
+            vkCmdBindVertexBuffers(cmd, 3, 1, &vertexBuffers[1], &offsets[1])
+            vkCmdBindIndexBuffer(cmd, buffers[2].buffer, 0, VK_INDEX_TYPE_UINT16)
+            vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0)
+            // The same indices, 32-bit, four vertices on: the right quad.
+            vkCmdBindIndexBuffer(cmd, buffers[3].buffer, 0, VK_INDEX_TYPE_UINT32)
+            vkCmdDrawIndexed(cmd, 6, 1, 0, 4, 0)
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixels = target.read(core)
+
+        #expect(rgba(pixels, 32, 2, 3) == [255, 0, 0, 255])
+        #expect(rgba(pixels, 32, 15, 12) == [255, 0, 0, 255])
+        #expect(rgba(pixels, 32, 16, 3) == [0, 0, 255, 255])
+        #expect(rgba(pixels, 32, 30, 14) == [0, 0, 255, 255])
+    }
+
+    @Test func stencilWrittenWithDynamicMasksDecidesWhereLaterDrawsLand() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try DepthStencilTarget(core, width: 32, height: 16)
+        defer { target.destroy(core) }
+        let buffers = quadBuffers(core)
+        defer { buffers.forEach { $0.destroy(device: core.device) } }
+
+        func stencil(_ compare: VkCompareOp, _ pass: VkStencilOp) -> VkPipelineDepthStencilStateCreateInfo {
+            var face = VkStencilOpState()
+            face.compareOp = compare
+            face.passOp = pass
+            face.failOp = VK_STENCIL_OP_KEEP
+            face.depthFailOp = VK_STENCIL_OP_KEEP
+            var state = VkPipelineDepthStencilStateCreateInfo()
+            state.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+            state.stencilTestEnable = VK_TRUE
+            state.front = face
+            state.back = face
+            return state
+        }
+        let write = try TestPipeline(core, renderPass: target.renderPass, colorShaders(),
+                                     depthStencil: stencil(VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_REPLACE), colorWriteMask: 0)
+        let test = try TestPipeline(core, renderPass: target.renderPass, colorShaders(),
+                                    depthStencil: stencil(VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP))
+        defer { write.destroy(core); test.destroy(core) }
+
+        let both = VkStencilFaceFlags(VK_STENCIL_FACE_FRONT_AND_BACK.rawValue)
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            // Reference 3 through write mask 1: the left half's stencil becomes 1.
+            write.bind(cmd, width: 32, height: 16)
+            vkCmdSetStencilReference(cmd, both, 3)
+            vkCmdSetStencilWriteMask(cmd, both, 0x1)
+            vkCmdSetStencilCompareMask(cmd, both, 0xFF)
+            buffers.draw(cmd, quad: 0)
+            // Equal to 1 passes exactly there; green over the whole target.
+            test.bind(cmd, width: 32, height: 16)
+            vkCmdSetStencilReference(cmd, both, 1)
+            buffers.draw(cmd, quad: 2)
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixels = target.read(core)
+
+        #expect(rgba(pixels, 32, 3, 8) == [0, 255, 0, 255])
+        #expect(rgba(pixels, 32, 15, 0) == [0, 255, 0, 255])
+        #expect(rgba(pixels, 32, 16, 8) == [0, 0, 0, 255])
+        #expect(rgba(pixels, 32, 31, 15) == [0, 0, 0, 255])
+    }
+
+    @Test func depthTestKeepsTheNearerSurface() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try DepthStencilTarget(core, width: 16, height: 16)
+        defer { target.destroy(core) }
+        let buffers = quadBuffers(core)
+        defer { buffers.forEach { $0.destroy(device: core.device) } }
+        var depth = VkPipelineDepthStencilStateCreateInfo()
+        depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+        depth.depthTestEnable = VK_TRUE
+        depth.depthWriteEnable = VK_TRUE
+        depth.depthCompareOp = VK_COMPARE_OP_LESS
+        let draw = try TestPipeline(core, renderPass: target.renderPass, colorShaders(), depthStencil: depth)
+        defer { draw.destroy(core) }
+
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            draw.bind(cmd, width: 16, height: 16)
+            buffers.draw(cmd, quad: 1)   // red, z 0.25
+            buffers.draw(cmd, quad: 2)   // green, z 0.75: behind, hidden
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixels = target.read(core)
+
+        #expect(rgba(pixels, 16, 0, 0) == [255, 0, 0, 255])
+        #expect(rgba(pixels, 16, 8, 8) == [255, 0, 0, 255])
+        #expect(rgba(pixels, 16, 15, 15) == [255, 0, 0, 255])
+    }
+
+    @Test func clearAttachmentsClearsOnlyTheRectAndLaterDrawsCarryOn() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try ColorTarget(core, width: 32, height: 16)
+        defer { target.destroy(core) }
+        let fragment = try compile("""
+        #version 450
+        layout(location = 0) out vec4 fragColor;
+        void main() { fragColor = vec4(1.0, 0.0, 0.0, 1.0); }
+        """, .fragment)
+        let draw = try QuadDraw(core, pass: target.pass, fragment: fragment, pushConstantBytes: 0)
+        defer { draw.destroy(core) }
+
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            var scissor = VkRect2D(offset: VkOffset2D(x: 24, y: 0), extent: VkExtent2D(width: 8, height: 16))
+            vkCmdSetScissor(cmd, 0, 1, &scissor)
+            var attachment = VkClearAttachment()
+            attachment.aspectMask = VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue)
+            attachment.colorAttachment = 0
+            attachment.clearValue.color = VkClearColorValue(float32: (0, 1, 0, 1))
+            var rect = VkClearRect(rect: VkRect2D(offset: VkOffset2D(x: 0, y: 4), extent: VkExtent2D(width: 16, height: 8)),
+                                   baseArrayLayer: 0, layerCount: 1)
+            vkCmdClearAttachments(cmd, 1, &attachment, 1, &rect)
+            // Red through the scissor set before the clear: the clear must
+            // not have changed it.
+            draw.record(cmd)
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixels = target.read(core)
+
+        #expect(rgba(pixels, 32, 0, 4) == [0, 255, 0, 255])
+        #expect(rgba(pixels, 32, 15, 11) == [0, 255, 0, 255])
+        #expect(rgba(pixels, 32, 0, 3) == [0, 0, 0, 0])
+        #expect(rgba(pixels, 32, 16, 8) == [0, 0, 0, 0])
+        #expect(rgba(pixels, 32, 24, 0) == [255, 0, 0, 255])
+        #expect(rgba(pixels, 32, 31, 15) == [255, 0, 0, 255])
+    }
+
+    @Test func blendConstantsScaleTheSource() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try ColorTarget(core, width: 8, height: 8)
+        defer { target.destroy(core) }
+        let buffers = quadBuffers(core)
+        defer { buffers.forEach { $0.destroy(device: core.device) } }
+        var blend = VkPipelineColorBlendAttachmentState()
+        blend.blendEnable = VK_TRUE
+        blend.srcColorBlendFactor = VK_BLEND_FACTOR_CONSTANT_COLOR
+        blend.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO
+        blend.colorBlendOp = VK_BLEND_OP_ADD
+        blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA
+        blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO
+        blend.alphaBlendOp = VK_BLEND_OP_ADD
+        blend.colorWriteMask = 0xF
+        let draw = try TestPipeline(core, renderPass: target.pass.renderPass!, colorShaders(), blend: blend)
+        defer { draw.destroy(core) }
+
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            draw.bind(cmd, width: 8, height: 8)
+            var constants: (Float, Float, Float, Float) = (0.25, 0.5, 0.75, 1)
+            withUnsafePointer(to: &constants) { $0.withMemoryRebound(to: Float.self, capacity: 4) { vkCmdSetBlendConstants(cmd, $0) } }
+            buffers.draw(cmd, quad: 3)   // white
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixel = rgba(target.read(core), 8, 4, 4)
+
+        #expect(close(pixel[0], 0.25 * 255) && close(pixel[1], 0.5 * 255) && close(pixel[2], 0.75 * 255) && pixel[3] == 255, "\(pixel)")
+    }
+
+    @Test func vertexShaderWritingPointSizeStillDraws() throws {
+        let core = try VulkanCore(imageCount: 1)
+        let target = try ColorTarget(core, width: 8, height: 8)
+        defer { target.destroy(core) }
+        let buffers = quadBuffers(core)
+        defer { buffers.forEach { $0.destroy(device: core.device) } }
+        // What a pipeline that may draw points writes; WebGPU has no point
+        // size, so the translation drops it and the draw goes ahead.
+        let vertex = try compile("""
+        #version 450
+        layout(location = 0) in vec3 position;
+        layout(location = 1) in vec4 color;
+        layout(location = 0) out vec4 vColor;
+        void main() { gl_PointSize = 1.0; gl_Position = vec4(position, 1.0); vColor = color; }
+        """, .vertex)
+        let draw = try TestPipeline(core, renderPass: target.pass.renderPass!, (vertex, colorShaders().fragment))
+        defer { draw.destroy(core) }
+
+        core.withOneTimeCommands { cmd in
+            target.begin(cmd)
+            draw.bind(cmd, width: 8, height: 8)
+            buffers.draw(cmd, quad: 2)   // green
+            vkCmdEndRenderPass(cmd)
+        }
+        let pixels = target.read(core)
+
+        #expect(rgba(pixels, 8, 0, 0) == [0, 255, 0, 255])
+        #expect(rgba(pixels, 8, 7, 7) == [0, 255, 0, 255])
+    }
+
+    // MARK: Descriptor pools, device
+
+    @Test func resetDescriptorPoolReturnsEverySet() throws {
+        let core = try VulkanCore(imageCount: 1)
+        var binding = VkDescriptorSetLayoutBinding(
+            binding: 0, descriptorType: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, descriptorCount: 1,
+            stageFlags: VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT.rawValue), pImmutableSamplers: nil)
+        var layoutInfo = VkDescriptorSetLayoutCreateInfo()
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+        layoutInfo.bindingCount = 1
+        var setLayout: VkDescriptorSetLayout?
+        withUnsafePointer(to: &binding) { layoutInfo.pBindings = $0; vkCreateDescriptorSetLayout(core.device, &layoutInfo, nil, &setLayout) }
+        var size = VkDescriptorPoolSize(type: VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, descriptorCount: 2)
+        var poolInfo = VkDescriptorPoolCreateInfo()
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
+        poolInfo.maxSets = 2
+        poolInfo.poolSizeCount = 1
+        var pool: VkDescriptorPool?
+        withUnsafePointer(to: &size) { poolInfo.pPoolSizes = $0; vkCreateDescriptorPool(core.device, &poolInfo, nil, &pool) }
+        defer {
+            vkDestroyDescriptorPool(core.device, pool, nil)
+            vkDestroyDescriptorSetLayout(core.device, setLayout, nil)
+        }
+        func allocate(_ count: Int) -> VkResult {
+            var layouts = [VkDescriptorSetLayout?](repeating: setLayout, count: count)
+            var sets = [VkDescriptorSet?](repeating: nil, count: count)
+            var info = VkDescriptorSetAllocateInfo()
+            info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+            info.descriptorPool = pool
+            info.descriptorSetCount = UInt32(count)
+            return layouts.withUnsafeMutableBufferPointer { info.pSetLayouts = UnsafePointer($0.baseAddress); return vkAllocateDescriptorSets(core.device, &info, &sets) }
+        }
+
+        #expect(allocate(2) == VK_SUCCESS)
+        #expect(allocate(1) == VK_ERROR_OUT_OF_POOL_MEMORY)
+        #expect(vkResetDescriptorPool(core.device, pool, 0) == VK_SUCCESS)
+        #expect(allocate(2) == VK_SUCCESS)
+    }
+
+    @Test func physicalDevicePropertiesReportTheWebGPULimits() throws {
+        let core = try VulkanCore(imageCount: 1)
+        var properties = VkPhysicalDeviceProperties()
+        vkGetPhysicalDeviceProperties(core.physicalDevice, &properties)
+        let name = withUnsafeBytes(of: properties.deviceName) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+
+        #expect(!name.isEmpty)
+        #expect(properties.limits.minUniformBufferOffsetAlignment == 256)
+        #expect(properties.limits.maxImageDimension2D >= 8192)
+        #expect(properties.limits.maxColorAttachments == 8)
+        #expect(properties.limits.maxBoundDescriptorSets >= 3)
     }
 
     // MARK: Transfers
@@ -258,17 +531,291 @@ private func compile(_ source: String, _ stage: VKShaderCompiler.ShaderStage) th
                  "\(VKShaderCompiler.shared.lastErrorMessage ?? "")")
 }
 
+
+/// A host-visible buffer holding `values`.
+private func upload<T>(_ core: VulkanCore, _ values: [T], _ usage: VkBufferUsageFlagBits) -> BufferAndMemory {
+    values.withUnsafeBytes { core.createBuffer(size: $0.count, usage: VkBufferUsageFlags(usage.rawValue), seed: $0.baseAddress) }
+}
+
+/// The vertex and fragment shader of the vertex-input tests: a clip-space
+/// position (binding 0) and an RGBA8 colour (binding 3).
+private func colorShaders() throws -> (vertex: [UInt32], fragment: [UInt32]) {
+    let vertex = try compile("""
+    #version 450
+    layout(location = 0) in vec3 position;
+    layout(location = 1) in vec4 color;
+    layout(location = 0) out vec4 vColor;
+    void main() { gl_Position = vec4(position, 1.0); vColor = color; }
+    """, .vertex)
+    let fragment = try compile("""
+    #version 450
+    layout(location = 0) in vec4 vColor;
+    layout(location = 0) out vec4 fragColor;
+    void main() { fragColor = vColor; }
+    """, .fragment)
+    return (vertex, fragment)
+}
+
+/// Full-target quads for `colorShaders`: 0 the left half (z 0.5, red), 1 the
+/// whole target (z 0.25, red), 2 the whole target (z 0.75, green), 3 the
+/// whole target (z 0.5, white) — four vertices each, as a strip.
+private struct QuadBuffers: Sequence {
+    let positions: BufferAndMemory
+    let colors: BufferAndMemory
+
+    func makeIterator() -> IndexingIterator<[BufferAndMemory]> { [positions, colors].makeIterator() }
+
+    func draw(_ cmd: VkCommandBuffer, quad: Int) {
+        var buffers: [VkBuffer?] = [positions.buffer, colors.buffer]
+        var offsets: [VkDeviceSize] = [0, 0]
+        vkCmdBindVertexBuffers(cmd, 0, 1, &buffers[0], &offsets[0])
+        vkCmdBindVertexBuffers(cmd, 3, 1, &buffers[1], &offsets[1])
+        vkCmdDraw(cmd, 4, 1, UInt32(quad * 4), 0)
+    }
+}
+
+private func quadBuffers(_ core: VulkanCore) -> QuadBuffers {
+    func quad(x0: Float, x1: Float, z: Float) -> [Float] { [x0, -1, z, x1, -1, z, x0, 1, z, x1, 1, z] }
+    let positions = quad(x0: -1, x1: 0, z: 0.5) + quad(x0: -1, x1: 1, z: 0.25) + quad(x0: -1, x1: 1, z: 0.75) + quad(x0: -1, x1: 1, z: 0.5)
+    let colors: [[UInt8]] = [[255, 0, 0, 255], [255, 0, 0, 255], [0, 255, 0, 255], [255, 255, 255, 255]]
+    let perVertex = colors.flatMap { color in Array(repeating: color, count: 4).flatMap { $0 } }
+    return QuadBuffers(positions: upload(core, positions, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT),
+                       colors: upload(core, perVertex, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT))
+}
+
+/// A graphics pipeline for the vertex-input tests: position at binding 0,
+/// colour at binding 3, dynamic viewport/scissor/stencil/blend constants.
+private struct TestPipeline {
+    let layout: VkPipelineLayout
+    let pipeline: VkPipeline
+
+    init(_ core: VulkanCore, renderPass: VkRenderPass, _ shaders: (vertex: [UInt32], fragment: [UInt32]),
+         depthStencil: VkPipelineDepthStencilStateCreateInfo? = nil, colorWriteMask: UInt32 = 0xF,
+         blend: VkPipelineColorBlendAttachmentState? = nil) throws {
+        var layoutInfo = VkPipelineLayoutCreateInfo()
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+        var layout: VkPipelineLayout?
+        guard vkCreatePipelineLayout(core.device, &layoutInfo, nil, &layout) == VK_SUCCESS, let layout else { throw VulkanCoreError.pipeline }
+        self.layout = layout
+
+        func module(_ words: [UInt32]) -> VkShaderModule? {
+            var info = VkShaderModuleCreateInfo()
+            info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+            info.codeSize = words.count * 4
+            var module: VkShaderModule?
+            words.withUnsafeBufferPointer { info.pCode = $0.baseAddress; _ = vkCreateShaderModule(core.device, &info, nil, &module) }
+            return module
+        }
+        let vertexModule = module(shaders.vertex), fragmentModule = module(shaders.fragment)
+        defer {
+            vkDestroyShaderModule(core.device, vertexModule, nil)
+            vkDestroyShaderModule(core.device, fragmentModule, nil)
+        }
+        let main = strdup("main")!
+        defer { free(main) }
+        var stages = [VkPipelineShaderStageCreateInfo(), VkPipelineShaderStageCreateInfo()]
+        for (i, (stage, module)) in [(VK_SHADER_STAGE_VERTEX_BIT, vertexModule), (VK_SHADER_STAGE_FRAGMENT_BIT, fragmentModule)].enumerated() {
+            stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+            stages[i].stage = stage
+            stages[i].module = module
+            stages[i].pName = UnsafePointer(main)
+        }
+        var bindings = [
+            VkVertexInputBindingDescription(binding: 0, stride: 12, inputRate: VK_VERTEX_INPUT_RATE_VERTEX),
+            VkVertexInputBindingDescription(binding: 3, stride: 4, inputRate: VK_VERTEX_INPUT_RATE_VERTEX),
+        ]
+        var attributes = [
+            VkVertexInputAttributeDescription(location: 0, binding: 0, format: VK_FORMAT_R32G32B32_SFLOAT, offset: 0),
+            VkVertexInputAttributeDescription(location: 1, binding: 3, format: VK_FORMAT_R8G8B8A8_UNORM, offset: 0),
+        ]
+        var vertexInput = VkPipelineVertexInputStateCreateInfo()
+        vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+        var assembly = VkPipelineInputAssemblyStateCreateInfo()
+        assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+        assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+        var viewport = VkPipelineViewportStateCreateInfo()
+        viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+        viewport.viewportCount = 1
+        viewport.scissorCount = 1
+        var raster = VkPipelineRasterizationStateCreateInfo()
+        raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+        raster.lineWidth = 1
+        var multisample = VkPipelineMultisampleStateCreateInfo()
+        multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+        multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+        var attachment = blend ?? VkPipelineColorBlendAttachmentState()
+        if blend == nil { attachment.colorWriteMask = VkColorComponentFlags(colorWriteMask) }
+        var colorBlend = VkPipelineColorBlendStateCreateInfo()
+        colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+        colorBlend.attachmentCount = 1
+        var depth = depthStencil ?? VkPipelineDepthStencilStateCreateInfo()
+        depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO
+        var dynamicStates = [VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+                             VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK, VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_STENCIL_REFERENCE]
+        var dynamic = VkPipelineDynamicStateCreateInfo()
+        dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
+        dynamic.dynamicStateCount = UInt32(dynamicStates.count)
+
+        var info = VkGraphicsPipelineCreateInfo()
+        info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+        info.stageCount = 2
+        info.layout = layout
+        info.renderPass = renderPass
+        var pipeline: VkPipeline?
+        let result = stages.withUnsafeBufferPointer { stagesPtr in
+            bindings.withUnsafeMutableBufferPointer { bindingsPtr in
+                attributes.withUnsafeMutableBufferPointer { attributesPtr in
+                    dynamicStates.withUnsafeMutableBufferPointer { dynamicPtr in
+                        withUnsafeMutablePointer(to: &attachment) { attachmentPtr in
+                            vertexInput.vertexBindingDescriptionCount = 2
+                            vertexInput.pVertexBindingDescriptions = UnsafePointer(bindingsPtr.baseAddress)
+                            vertexInput.vertexAttributeDescriptionCount = 2
+                            vertexInput.pVertexAttributeDescriptions = UnsafePointer(attributesPtr.baseAddress)
+                            colorBlend.pAttachments = UnsafePointer(attachmentPtr)
+                            dynamic.pDynamicStates = UnsafePointer(dynamicPtr.baseAddress)
+                            info.pStages = stagesPtr.baseAddress
+                            return withUnsafePointer(to: &vertexInput) { info.pVertexInputState = $0
+                                return withUnsafePointer(to: &assembly) { info.pInputAssemblyState = $0
+                                    return withUnsafePointer(to: &viewport) { info.pViewportState = $0
+                                        return withUnsafePointer(to: &raster) { info.pRasterizationState = $0
+                                            return withUnsafePointer(to: &multisample) { info.pMultisampleState = $0
+                                                return withUnsafePointer(to: &depth) { info.pDepthStencilState = depthStencil == nil ? nil : $0
+                                                    return withUnsafePointer(to: &colorBlend) { info.pColorBlendState = $0
+                                                        return withUnsafePointer(to: &dynamic) { info.pDynamicState = $0
+                                                            return vkCreateGraphicsPipelines(core.device, nil, 1, &info, nil, &pipeline)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        guard result == VK_SUCCESS, let pipeline else { throw VulkanCoreError.pipeline }
+        self.pipeline = pipeline
+    }
+
+    /// Binds the pipeline with a viewport and scissor over the target.
+    func bind(_ cmd: VkCommandBuffer, width: Int, height: Int) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+        var viewport = VkViewport(x: 0, y: 0, width: Float(width), height: Float(height), minDepth: 0, maxDepth: 1)
+        vkCmdSetViewport(cmd, 0, 1, &viewport)
+        var scissor = VkRect2D(offset: VkOffset2D(x: 0, y: 0), extent: VkExtent2D(width: UInt32(width), height: UInt32(height)))
+        vkCmdSetScissor(cmd, 0, 1, &scissor)
+    }
+
+    func destroy(_ core: VulkanCore) {
+        vkDestroyPipeline(core.device, pipeline, nil)
+        vkDestroyPipelineLayout(core.device, layout, nil)
+    }
+}
+
+/// An RGBA8 colour image and a D24S8 depth/stencil image in one render
+/// pass: colour cleared to opaque black, depth to 1, stencil to 0.
+private struct DepthStencilTarget {
+    let color: TestImage
+    let depthStencil: TestImage
+    let renderPass: VkRenderPass
+    let framebuffer: VkFramebuffer
+    let width: Int
+    let height: Int
+
+    init(_ core: VulkanCore, width: Int, height: Int) throws {
+        color = try TestImage(core, width: width, height: height,
+                              usage: VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT.rawValue | VK_IMAGE_USAGE_TRANSFER_SRC_BIT.rawValue)
+        depthStencil = try TestImage(core, width: width, height: height, usage: VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT.rawValue,
+                                     format: VK_FORMAT_D24_UNORM_S8_UINT,
+                                     aspect: VK_IMAGE_ASPECT_DEPTH_BIT.rawValue | VK_IMAGE_ASPECT_STENCIL_BIT.rawValue)
+        var attachments = [VkAttachmentDescription(), VkAttachmentDescription()]
+        for (i, format) in [VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D24_UNORM_S8_UINT].enumerated() {
+            attachments[i].format = format
+            attachments[i].samples = VK_SAMPLE_COUNT_1_BIT
+            attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR
+            attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE
+            attachments[i].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR
+            attachments[i].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE
+            attachments[i].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+            attachments[i].finalLayout = i == 0 ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        }
+        var colorRef = VkAttachmentReference(attachment: 0, layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+        var depthRef = VkAttachmentReference(attachment: 1, layout: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        var subpass = VkSubpassDescription()
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS
+        subpass.colorAttachmentCount = 1
+        var info = VkRenderPassCreateInfo()
+        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+        info.attachmentCount = 2
+        info.subpassCount = 1
+        var pass: VkRenderPass?
+        let result = withUnsafePointer(to: &colorRef) { colorPtr in
+            withUnsafePointer(to: &depthRef) { depthPtr in
+                attachments.withUnsafeBufferPointer { attachmentsPtr in
+                    subpass.pColorAttachments = colorPtr
+                    subpass.pDepthStencilAttachment = depthPtr
+                    info.pAttachments = attachmentsPtr.baseAddress
+                    return withUnsafePointer(to: &subpass) { info.pSubpasses = $0; return vkCreateRenderPass(core.device, &info, nil, &pass) }
+                }
+            }
+        }
+        guard result == VK_SUCCESS, let pass else { throw VulkanCoreError.pipeline }
+        renderPass = pass
+        var views: [VkImageView?] = [color.view, depthStencil.view]
+        var framebufferInfo = VkFramebufferCreateInfo()
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+        framebufferInfo.renderPass = pass
+        framebufferInfo.attachmentCount = 2
+        framebufferInfo.width = UInt32(width)
+        framebufferInfo.height = UInt32(height)
+        framebufferInfo.layers = 1
+        var framebuffer: VkFramebuffer?
+        views.withUnsafeMutableBufferPointer { framebufferInfo.pAttachments = UnsafePointer($0.baseAddress); _ = vkCreateFramebuffer(core.device, &framebufferInfo, nil, &framebuffer) }
+        self.framebuffer = try #require(framebuffer)
+        self.width = width
+        self.height = height
+    }
+
+    func begin(_ cmd: VkCommandBuffer) {
+        var clears = [VkClearValue(), VkClearValue()]
+        clears[0].color = VkClearColorValue(float32: (0, 0, 0, 1))
+        clears[1].depthStencil = VkClearDepthStencilValue(depth: 1, stencil: 0)
+        var info = VkRenderPassBeginInfo()
+        info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
+        info.renderPass = renderPass
+        info.framebuffer = framebuffer
+        info.renderArea = VkRect2D(offset: VkOffset2D(x: 0, y: 0), extent: VkExtent2D(width: UInt32(width), height: UInt32(height)))
+        info.clearValueCount = 2
+        clears.withUnsafeBufferPointer { info.pClearValues = $0.baseAddress; vkCmdBeginRenderPass(cmd, &info, VK_SUBPASS_CONTENTS_INLINE) }
+    }
+
+    func read(_ core: VulkanCore) -> [UInt8] {
+        readPixels(core, color.image, width: width, height: height)
+    }
+
+    func destroy(_ core: VulkanCore) {
+        vkDestroyFramebuffer(core.device, framebuffer, nil)
+        vkDestroyRenderPass(core.device, renderPass, nil)
+        depthStencil.destroy(core)
+        color.destroy(core)
+    }
+}
+
 /// An RGBA8 image with its memory and a 2D view.
 private struct TestImage {
     let image: VkImage
     let memory: VkDeviceMemory
     let view: VkImageView
 
-    init(_ core: VulkanCore, width: Int, height: Int, usage: UInt32) throws {
+    init(_ core: VulkanCore, width: Int, height: Int, usage: UInt32,
+         format: VkFormat = VK_FORMAT_R8G8B8A8_UNORM, aspect: UInt32 = VK_IMAGE_ASPECT_COLOR_BIT.rawValue) throws {
         var info = VkImageCreateInfo()
         info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
         info.imageType = VK_IMAGE_TYPE_2D
-        info.format = VK_FORMAT_R8G8B8A8_UNORM
+        info.format = format
         info.extent = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
         info.mipLevels = 1
         info.arrayLayers = 1
@@ -291,9 +838,9 @@ private struct TestImage {
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
         viewInfo.image = image
         viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D
-        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM
+        viewInfo.format = format
         viewInfo.subresourceRange = VkImageSubresourceRange(
-            aspectMask: VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue), baseMipLevel: 0, levelCount: 1, baseArrayLayer: 0, layerCount: 1)
+            aspectMask: VkImageAspectFlags(aspect), baseMipLevel: 0, levelCount: 1, baseArrayLayer: 0, layerCount: 1)
         var view: VkImageView?
         guard vkCreateImageView(core.device, &viewInfo, nil, &view) == VK_SUCCESS, let view else { throw VulkanBootstrapError.image }
         self.image = image

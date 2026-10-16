@@ -168,6 +168,51 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     pMemoryProperties->memoryHeaps[1].size = 1ull << 30;
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice, VkPhysicalDeviceProperties *pProperties) {
+    const nwg_device_info_t *info = &physicalDevice->info;
+    memset(pProperties, 0, sizeof *pProperties);
+    pProperties->apiVersion = VK_API_VERSION_1_0;
+    pProperties->deviceType = VK_PHYSICAL_DEVICE_TYPE_OTHER;
+    size_t length = strlen(info->adapterName);
+    if (length >= sizeof pProperties->deviceName) length = sizeof pProperties->deviceName - 1;
+    memcpy(pProperties->deviceName, info->adapterName, length);
+    // WebGPU's limits, as the device was created with them.
+    VkPhysicalDeviceLimits *limits = &pProperties->limits;
+    limits->maxImageDimension1D = info->maxTextureDimension2D;
+    limits->maxImageDimension2D = info->maxTextureDimension2D;
+    limits->maxImageDimension3D = info->maxTextureDimension3D;
+    limits->maxImageDimensionCube = info->maxTextureDimension2D;
+    limits->maxImageArrayLayers = info->maxTextureArrayLayers;
+    limits->maxUniformBufferRange = info->maxUniformBufferBindingSize;
+    limits->maxStorageBufferRange = info->maxStorageBufferBindingSize;
+    limits->maxPushConstantsSize = NWG_MAX_PUSH_CONSTANTS;
+    limits->maxBoundDescriptorSets = info->maxBindGroups > 1 ? info->maxBindGroups - 1 : 1;  // one is the draw-data group
+    limits->maxVertexInputAttributes = NWG_MAX_VERTEX_ATTRIBUTES;
+    limits->maxVertexInputBindings = 8;
+    limits->maxVertexInputAttributeOffset = 2047;
+    limits->maxVertexInputBindingStride = 2048;
+    limits->maxComputeWorkGroupInvocations = info->maxComputeInvocationsPerWorkgroup;
+    for (int i = 0; i < 3; i++) limits->maxComputeWorkGroupCount[i] = info->maxComputeWorkgroupsPerDimension;
+    limits->maxViewports = 1;
+    limits->maxViewportDimensions[0] = limits->maxViewportDimensions[1] = info->maxTextureDimension2D;
+    limits->maxFramebufferWidth = limits->maxFramebufferHeight = info->maxTextureDimension2D;
+    limits->maxFramebufferLayers = 1;
+    limits->maxColorAttachments = VKW_MAX_COLOR_ATTACHMENTS;
+    limits->framebufferColorSampleCounts = limits->framebufferDepthSampleCounts =
+        limits->framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    limits->minUniformBufferOffsetAlignment = 256;
+    limits->minStorageBufferOffsetAlignment = 256;
+    limits->minMemoryMapAlignment = 64;
+    limits->optimalBufferCopyOffsetAlignment = 256;
+    limits->optimalBufferCopyRowPitchAlignment = NWG_COPY_ROW_ALIGNMENT;
+    limits->nonCoherentAtomSize = 4;
+    limits->maxSamplerAnisotropy = 16;
+    limits->maxSamplerLodBias = 0;
+    limits->timestampComputeAndGraphics = VK_FALSE;
+    limits->pointSizeRange[0] = limits->pointSizeRange[1] = 1;
+    limits->lineWidthRange[0] = limits->lineWidthRange[1] = 1;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceFormatProperties(
     VkPhysicalDevice physicalDevice, VkFormat format, VkFormatProperties *pFormatProperties) {
     memset(pFormatProperties, 0, sizeof *pFormatProperties);

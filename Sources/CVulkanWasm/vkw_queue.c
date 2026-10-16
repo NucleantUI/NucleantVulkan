@@ -93,6 +93,10 @@ typedef struct {
     float         clamped[4];
     float         remap[4];
     int           viewportEmpty;
+    // Stencil state per face (index 0 front, 1 back): compare mask, write
+    // mask, reference. WebGPU has one of each for both faces.
+    uint32_t      stencil[2][3];
+    float         blendConstants[4];
 } cb_state_t;
 
 typedef struct {
@@ -266,6 +270,23 @@ static void begin_render_pass(stream_t *s, cb_state_t *st, const vkw_cmd_t *cmd)
         emit_f(s, clear.float32[2]);
         emit_f(s, clear.float32[3]);
     }
+    uint32_t depthRef = pass->depthRef;
+    if (depthRef != VK_ATTACHMENT_UNUSED && depthRef < framebuffer->attachmentCount) {
+        const vkw_attachment_t *att = &pass->attachments[depthRef];
+        VkClearDepthStencilValue clear = { 1.0f, 0 };
+        if (depthRef < cmd->beginRenderPass.clearCount) clear = cmd->beginRenderPass.clears[depthRef].depthStencil;
+        emit(s, framebuffer->attachments[depthRef]->gpu);
+        emit(s, att->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD ? 0u : 1u);
+        emit(s, att->storeOp == VK_ATTACHMENT_STORE_OP_STORE ? 0u : 1u);
+        emit_f(s, clear.depth);
+        emit(s, att->stencilLoadOp == VK_ATTACHMENT_LOAD_OP_LOAD ? 0u : 1u);
+        emit(s, att->stencilStoreOp == VK_ATTACHMENT_STORE_OP_STORE ? 0u : 1u);
+        emit(s, clear.stencil);
+    } else {
+        for (int k = 0; k < 7; k++) emit(s, 0);
+    }
+    emit(s, framebuffer->width);
+    emit(s, framebuffer->height);
     st->inRender = 1;
     st->targetWidth = framebuffer->width;
     st->targetHeight = framebuffer->height;
@@ -273,6 +294,79 @@ static void begin_render_pass(stream_t *s, cb_state_t *st, const vkw_cmd_t *cmd)
     st->viewportDirty = 1;
     st->scissorDirty = 1;
     st->drawDataDirty[NWG_BIND_GRAPHICS] = 1;
+}
+
+static void emit_stencil_masks(stream_t *s, const cb_state_t *st) {
+    emit(s, NWG_OP_SET_STENCIL_MASKS);
+    emit(s, st->stencil[0][VKW_STENCIL_COMPARE_MASK]);
+    emit(s, st->stencil[0][VKW_STENCIL_WRITE_MASK]);
+}
+
+static void emit_stencil_reference(stream_t *s, const cb_state_t *st) {
+    emit(s, NWG_OP_SET_STENCIL_REFERENCE);
+    emit(s, st->stencil[0][VKW_STENCIL_REFERENCE]);
+}
+
+static void emit_blend_constants(stream_t *s, const cb_state_t *st) {
+    emit(s, NWG_OP_SET_BLEND_CONSTANT);
+    for (int k = 0; k < 4; k++) emit_f(s, st->blendConstants[k]);
+}
+
+/// vkCmdSetStencil*: per face in Vulkan, one value for both in WebGPU — the
+/// front face's, which is what Vulkan's own front-and-back setting gives.
+static void set_stencil(stream_t *s, cb_state_t *st, const vkw_cmd_t *cmd) {
+    uint32_t which = cmd->stencil.which;
+    if (cmd->stencil.faces & VK_STENCIL_FACE_FRONT_BIT) st->stencil[0][which] = cmd->stencil.value;
+    if (cmd->stencil.faces & VK_STENCIL_FACE_BACK_BIT) st->stencil[1][which] = cmd->stencil.value;
+    static int warned;
+    if (st->stencil[0][which] != st->stencil[1][which] && (cmd->stencil.faces & VK_STENCIL_FACE_BACK_BIT) && !warned) {
+        warned = 1;
+        vkw_logf("vkCmdSetStencil*: a back face value other than the front's has no WebGPU equivalent; the front's applies to both");
+    }
+    if (which == VKW_STENCIL_REFERENCE) emit_stencil_reference(s, st);
+    else emit_stencil_masks(s, st);
+}
+
+/// vkCmdClearAttachments, inside the render pass: the rect, each attachment's
+/// clear value. The bridge draws it, so the viewport and scissor are given
+/// again before the next draw.
+static void clear_attachments(stream_t *s, cb_state_t *st, const vkw_cmd_t *cmd) {
+    if (!st->inRender) return;
+    const VkClearRect *rect = &cmd->clearAttachments.rect;
+    int64_t x0 = rect->rect.offset.x, y0 = rect->rect.offset.y;
+    int64_t x1 = x0 + rect->rect.extent.width, y1 = y0 + rect->rect.extent.height;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > st->targetWidth) x1 = st->targetWidth;
+    if (y1 > st->targetHeight) y1 = st->targetHeight;
+    if (x1 <= x0 || y1 <= y0) return;
+    uint32_t colors = 0;
+    int clearDepth = 0, clearStencil = 0;
+    VkClearDepthStencilValue depthStencil = { 1.0f, 0 };
+    for (uint32_t i = 0; i < cmd->clearAttachments.count; i++) {
+        const VkClearAttachment *a = &cmd->clearAttachments.attachments[i];
+        if (a->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) colors++;
+        if (a->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) { clearDepth = 1; depthStencil.depth = a->clearValue.depthStencil.depth; }
+        if (a->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) { clearStencil = 1; depthStencil.stencil = a->clearValue.depthStencil.stencil; }
+    }
+    emit(s, NWG_OP_CLEAR_ATTACHMENTS);
+    emit(s, (uint32_t)x0);
+    emit(s, (uint32_t)y0);
+    emit(s, (uint32_t)(x1 - x0));
+    emit(s, (uint32_t)(y1 - y0));
+    emit(s, colors);
+    for (uint32_t i = 0; i < cmd->clearAttachments.count; i++) {
+        const VkClearAttachment *a = &cmd->clearAttachments.attachments[i];
+        if (!(a->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)) continue;
+        emit(s, a->colorAttachment);
+        for (int k = 0; k < 4; k++) emit_f(s, a->clearValue.color.float32[k]);
+    }
+    emit(s, (uint32_t)clearDepth);
+    emit_f(s, depthStencil.depth);
+    emit(s, (uint32_t)clearStencil);
+    emit(s, depthStencil.stencil);
+    st->viewportDirty = 1;
+    st->scissorDirty = 1;
 }
 
 static int begin_draw(stream_t *s, cb_state_t *st) {
@@ -486,7 +580,20 @@ static void encode_command_buffer(stream_t *s, VkCommandBuffer cb, readbacks_t *
             emit(s, point);
             emit(s, pipeline ? pipeline->gpu : 0);
             if (point == NWG_BIND_GRAPHICS && pipeline) {
-                // Baked-in (non-dynamic) viewport/scissor apply on bind.
+                // Baked-in (non-dynamic) state applies on bind.
+                if (!pipeline->dynamicStencilMasks) {
+                    st.stencil[0][VKW_STENCIL_COMPARE_MASK] = st.stencil[1][VKW_STENCIL_COMPARE_MASK] = pipeline->stencilCompareMask;
+                    st.stencil[0][VKW_STENCIL_WRITE_MASK] = st.stencil[1][VKW_STENCIL_WRITE_MASK] = pipeline->stencilWriteMask;
+                    emit_stencil_masks(s, &st);
+                }
+                if (!pipeline->dynamicStencilReference) {
+                    st.stencil[0][VKW_STENCIL_REFERENCE] = st.stencil[1][VKW_STENCIL_REFERENCE] = pipeline->stencilReference;
+                    emit_stencil_reference(s, &st);
+                }
+                if (!pipeline->dynamicBlendConstants) {
+                    memcpy(st.blendConstants, pipeline->blendConstants, sizeof st.blendConstants);
+                    emit_blend_constants(s, &st);
+                }
                 if (!pipeline->dynamicViewport) {
                     st.viewport = pipeline->viewport;
                     st.hasViewport = 1;
@@ -527,6 +634,40 @@ static void encode_command_buffer(stream_t *s, VkCommandBuffer cb, readbacks_t *
             emit(s, cmd->draw.instanceCount);
             emit(s, cmd->draw.firstVertex);
             emit(s, cmd->draw.firstInstance);
+            break;
+        case VKW_CMD_DRAW_INDEXED:
+            if (!begin_draw(s, &st)) break;
+            emit(s, NWG_OP_DRAW_INDEXED);
+            emit(s, cmd->drawIndexed.indexCount);
+            emit(s, cmd->drawIndexed.instanceCount);
+            emit(s, cmd->drawIndexed.firstIndex);
+            emit(s, (uint32_t)cmd->drawIndexed.vertexOffset);
+            emit(s, cmd->drawIndexed.firstInstance);
+            break;
+        case VKW_CMD_BIND_VERTEX_BUFFERS:
+            for (uint32_t k = 0; k < cmd->vertexBuffers.count; k++) {
+                VkBuffer buffer = cmd->vertexBuffers.buffers[k];
+                emit(s, NWG_OP_SET_VERTEX_BUFFER);
+                emit(s, cmd->vertexBuffers.first + k);
+                emit(s, buffer ? buffer->gpu : 0);
+                emit(s, (uint32_t)cmd->vertexBuffers.offsets[k]);
+            }
+            break;
+        case VKW_CMD_BIND_INDEX_BUFFER:
+            emit(s, NWG_OP_SET_INDEX_BUFFER);
+            emit(s, cmd->indexBuffer.buffer ? cmd->indexBuffer.buffer->gpu : 0);
+            emit(s, (uint32_t)cmd->indexBuffer.offset);
+            emit(s, cmd->indexBuffer.type == VK_INDEX_TYPE_UINT32 ? 1u : 0u);
+            break;
+        case VKW_CMD_SET_STENCIL:
+            set_stencil(s, &st, cmd);
+            break;
+        case VKW_CMD_SET_BLEND_CONSTANTS:
+            memcpy(st.blendConstants, cmd->blendConstants, sizeof st.blendConstants);
+            emit_blend_constants(s, &st);
+            break;
+        case VKW_CMD_CLEAR_ATTACHMENTS:
+            clear_attachments(s, &st, cmd);
             break;
         case VKW_CMD_DRAW_INDIRECT:
             if (!begin_draw(s, &st)) break;
