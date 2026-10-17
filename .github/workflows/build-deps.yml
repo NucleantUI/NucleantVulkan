@@ -5,7 +5,8 @@
 #
 #   apple    MoltenVK, MoltenVK_lib, wgpu_native, wgpu_native_framework,
 #            shaderc, spirv-cross  (.xcframework.zip each)
-#   linux    nucleantvulkan-linux-x86_64.artifactbundle.zip      libwgpu_native.so
+#   linux    nucleantvulkan-linux-<x86_64|aarch64>.artifactbundle.zip   libwgpu_native.so
+#            (a machine per architecture)
 #   android  nucleantvulkan-android-<abi>.artifactbundle.zip     libwgpu_native.so,
 #            libshaderc_shared.so, libspirv-cross-c-shared.so
 #   wasm     nucleantvulkan-wasm32.artifactbundle.zip            shaderc, spirv-cross
@@ -115,10 +116,17 @@ jobs:
           swift test
 
   linux:
-    # x86_64, as Dependencies/linux. In Swift's own image, which has the
-    # toolchain.
+    name: linux (${{ matrix.arch }})
+    # A machine per architecture: a Linux machine builds and tests its own.
+    # In Swift's own image, which has the toolchain.
     if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'linux'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     container: swift:6.3.3-noble
     timeout-minutes: 360
     steps:
@@ -135,20 +143,20 @@ jobs:
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: wgpu-native
+      - name: wgpu-native ${{ matrix.arch }}
         run: |
           rm -rf Dependencies/linux/lib
           python3 scripts/build_wgpu.py --prefix Dependencies/linux
-      - name: Package
+      - name: Package ${{ matrix.arch }}
         run: >
-          python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-gnu
+          python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu
           --library Dependencies/linux/lib/libwgpu_native.so
-          --name nucleantvulkan-linux-x86_64 --output dist --version "$VERSION"
+          --name nucleantvulkan-linux-${{ matrix.arch }} --output dist --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
-          name: vulkan-linux
+          name: vulkan-linux-${{ matrix.arch }}
           path: dist/*.zip
-      - name: Test against it
+      - name: Test against it, ${{ matrix.arch }}
         run: |
           mkdir -p Artifacts && cp dist/*.zip Artifacts/
           swift test
