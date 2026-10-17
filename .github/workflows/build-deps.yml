@@ -172,9 +172,14 @@ jobs:
             "https://download.swift.org/swift-${SWIFT_VERSION}-release/android-sdk/${release}/${release}_android.artifactbundle.tar.gz" \
             --checksum d160cc3206dd1886dae3fef2337af5e25ec034692cd0ec225721c56cc69da7f5
           # Links the NDK's sysroot into the SDK.
-          setup=$(find "$HOME" -path "*${release}_android.artifactbundle*" -name setup-android-sdk.sh 2>/dev/null | head -1)
+          # Wherever SwiftPM put the bundle (not necessarily under $HOME in a container).
+          setup=$(find / -path /proc -prune -o -path "*${release}_android.artifactbundle*" -name setup-android-sdk.sh -print 2>/dev/null | head -1)
           echo "setup script: $setup"
-          test -n "$setup" && "$setup"
+          if [ -z "$setup" ]; then
+            find / -path /proc -prune -o -type d -name "${release}_android.artifactbundle" -print 2>/dev/null | head -1 | xargs -I{} find {} -maxdepth 3
+            exit 1
+          fi
+          "$setup"
       # Cross-compiled: builds and links the tests, which no device runs here.
       - name: Build against them
         env:
