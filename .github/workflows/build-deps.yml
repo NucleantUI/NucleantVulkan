@@ -92,13 +92,13 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
-      # wgpu-native's build (Rust; bindgen needs libclang), and the system
-      # libraries the package links on Linux. Not Ubuntu's clang package: it
-      # would replace the image's Swift clang in /usr/bin.
+      # wgpu-native's build (Rust, linking with cc; bindgen needs libclang),
+      # and the system libraries the package links on Linux. Not Ubuntu's
+      # clang package: it would replace the image's Swift clang in /usr/bin.
       - name: System packages
         run: >
           apt-get update && apt-get install -y
-          curl python3 pkg-config libclang-dev
+          gcc curl python3 pkg-config libclang-dev
           libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
       - name: Rust
         run: |
