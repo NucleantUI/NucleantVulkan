@@ -5,15 +5,21 @@
 #
 #   apple    MoltenVK, MoltenVK_lib, wgpu_native, wgpu_native_framework,
 #            shaderc, spirv-cross  (.xcframework.zip each)
-#   linux    nucleantvulkan-linux-<x86_64|aarch64>.artifactbundle.zip   libwgpu_native.so
-#            (a machine per architecture)
+#   linux    nucleantvulkan-linux-<x86_64|aarch64>.artifactbundle.zip   libvulkan.so
+#            (a machine per architecture)                        (the Khronos loader),
+#                                                                libwgpu_native.so,
+#                                                                libshaderc_shared.so,
+#                                                                libspirv-cross-c-shared.so
 #   android  nucleantvulkan-android-<abi>.artifactbundle.zip     libwgpu_native.so,
 #            libshaderc_shared.so, libspirv-cross-c-shared.so
 #   wasm     nucleantvulkan-wasm32.artifactbundle.zip            shaderc, spirv-cross
 #
+# Apple: macOS and iOS (iPadOS) only, for now.
+#
 # Linux and Android keep their libraries shared inside the bundles (see
-# scripts/make_artifactbundle.py); Linux takes shaderc and spirv-cross from
-# apt, as before.
+# scripts/make_artifactbundle.py). On Linux the bundle is everything an app
+# needs but the GPU driver: no system Vulkan, shaderc or spirv-cross, and the
+# Vulkan headers are vendored.
 #
 # The archives are this run's artifacts ("vulkan-*"). Run it by hand to check
 # that the dependencies still build; release.yml runs it for each release
@@ -86,28 +92,12 @@ jobs:
         run: python scripts/build_vulkan.py --dependencies ios
       - name: MoltenVK dependencies iOS simulator
         run: python scripts/build_vulkan.py --dependencies iossim
-      - name: MoltenVK dependencies tvOS
-        run: python scripts/build_vulkan.py --dependencies tvos
-      - name: MoltenVK dependencies tvOS simulator
-        run: python scripts/build_vulkan.py --dependencies tvossim
-      - name: MoltenVK dependencies visionOS
-        run: python scripts/build_vulkan.py --dependencies visionos
-      - name: MoltenVK dependencies visionOS simulator
-        run: python scripts/build_vulkan.py --dependencies visionossim
       - name: MoltenVK macOS
         run: python scripts/build_vulkan.py --platform macos
       - name: MoltenVK iOS
         run: python scripts/build_vulkan.py --platform ios
       - name: MoltenVK iOS simulator
         run: python scripts/build_vulkan.py --platform iossim
-      - name: MoltenVK tvOS
-        run: python scripts/build_vulkan.py --platform tvos
-      - name: MoltenVK tvOS simulator
-        run: python scripts/build_vulkan.py --platform tvossim
-      - name: MoltenVK visionOS
-        run: python scripts/build_vulkan.py --platform visionos
-      - name: MoltenVK visionOS simulator
-        run: python scripts/build_vulkan.py --platform visionossim
       - name: MoltenVK xcframeworks
         run: |
           python scripts/build_vulkan.py --install-only
@@ -115,7 +105,7 @@ jobs:
           plist=Dependencies/macos/MoltenVK.xcframework/Info.plist
           slices=$(plutil -extract AvailableLibraries raw "$plist")
           for i in $(seq 0 $((slices - 1))); do plutil -extract "AvailableLibraries.$i.LibraryIdentifier" raw "$plist"; done
-          test "$slices" -eq 7
+          test "$slices" -eq 3
       - name: Package
         run: |
           mkdir -p dist
@@ -154,14 +144,17 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
-      # wgpu-native's build (Rust, linking with cc; bindgen needs libclang),
-      # and the system libraries the package links on Linux. Not Ubuntu's
-      # clang package: it would replace the image's Swift clang in /usr/bin.
+      # What the libraries' builds take: wgpu-native's (Rust, linking with
+      # cc; bindgen needs libclang), CMake for the loader, shaderc and
+      # spirv-cross, the window systems' headers for the loader's WSI, and
+      # patchelf. Only for building them: the package itself builds and links
+      # against none of these. Not Ubuntu's clang package: it would replace
+      # the image's Swift clang in /usr/bin.
       - name: System packages
         run: >
           apt-get update && apt-get install -y
-          gcc curl python3 pkg-config libclang-dev
-          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
+          gcc g++ git curl python3 pkg-config libclang-dev cmake ninja-build patchelf
+          libwayland-dev libxcb1-dev libx11-dev libx11-xcb-dev libxrandr-dev
       - name: Rust
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -170,19 +163,46 @@ jobs:
         run: |
           rm -rf Dependencies/linux/lib
           python3 scripts/build_wgpu.py --prefix Dependencies/linux
+      - name: Vulkan loader ${{ matrix.arch }}
+        run: python3 scripts/build_vulkan.py
+      - name: shaderc + spirv-cross ${{ matrix.arch }}
+        run: python3 scripts/build_shader_tools.py --linux
       - name: Package ${{ matrix.arch }}
-        run: >
-          python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu
-          --library Dependencies/linux/lib/libwgpu_native.so
-          --name nucleantvulkan-linux-${{ matrix.arch }} --output dist --version "$VERSION"
+        run: |
+          lib=Dependencies/linux/lib
+          for so in libvulkan.so libwgpu_native.so libshaderc_shared.so libspirv-cross-c-shared.so; do
+            echo "$so: $(patchelf --print-soname $lib/$so 2>/dev/null) needs $(patchelf --print-needed $lib/$so | tr '\n' ' ')"
+          done
+          python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu \
+            --library $lib/libvulkan.so --library $lib/libwgpu_native.so \
+            --library $lib/libshaderc_shared.so --library $lib/libspirv-cross-c-shared.so \
+            --name nucleantvulkan-linux-${{ matrix.arch }} --output dist --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-linux-${{ matrix.arch }}
           path: dist/*.zip
+
+  linux-test:
+    name: linux test (${{ matrix.arch }})
+    needs: linux
+    # A fresh Swift image with nothing installed: the bundle alone has to
+    # build and run the tests, as it has to on a user's machine.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: swift:6.3.3-noble
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: vulkan-linux-${{ matrix.arch }}
+          path: Artifacts
       - name: Test against it, ${{ matrix.arch }}
-        run: |
-          mkdir -p Artifacts && cp dist/*.zip Artifacts/
-          swift test
+        run: swift test
 
   android:
     # Both ABIs on one machine, in Swift's image for the cross-compile after.

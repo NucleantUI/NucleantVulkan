@@ -9,16 +9,19 @@ import PackageDescription
 /// Decided the same way in every Nucleant package, so one setting covers the
 /// whole chain: `NUCLEANT_LOCAL_DEV=1|0` in the environment wins; otherwise
 /// local when the sibling checkout exists next to this package — true in a
-/// development tree, false for a clone SwiftPM made under `.build/checkouts`,
-/// which is what lets a git consumer resolve the chain without editing
-/// anything. Path dependencies are not allowed in a package fetched by
-/// revision, so a hardcoded `true` on master breaks every remote consumer.
+/// development tree, never for a clone SwiftPM (or Xcode) made in a
+/// `checkouts` directory: there the "sibling" is the dependency's own
+/// checkout, put next to this one by the same resolution, and taking it as a
+/// path dependency changes the graph under the resolver ("exhausted attempts
+/// to resolve"). Path dependencies are not allowed in a package fetched by
+/// version or revision anyway, so a hardcoded `true` breaks every consumer.
 let localDev: Bool = {
     if let flag = ProcessInfo.processInfo.environment["NUCLEANT_LOCAL_DEV"] {
         return ["1", "true", "yes"].contains(flag.lowercased())
     }
     let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantGeometry").path)
+    return siblings.lastPathComponent != "checkouts"
+        && FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantGeometry").path)
 }()
 
 func getPlatformTarget() -> PackageDescription.Platform {
@@ -132,7 +135,8 @@ func prebuiltBinary(_ name: String, _ archive: String) -> Target {
 /// per platform and architecture (scripts/make_artifactbundle.py). On Linux
 /// and Android the bundle holds the shared libraries themselves — SwiftPM
 /// copies them next to the product and links them, so libwgpu_native.so stays
-/// the one copy ThorVG's library links too.
+/// the one copy ThorVG's library links too, and an app ships every one of
+/// them: on Linux nothing but the GPU driver comes from the machine.
 func prebuiltLibrariesArchive() -> String {
     switch platformTarget {
     case .wasi:
@@ -156,32 +160,41 @@ func prebuiltVulkanTargets() -> [Target] {
     switch platformTarget {
     case .linux:
         return [
-            .systemLibrary(
-                name: "CVulkan",
-                path: "Sources/CVulkanLinux",
-                pkgConfig: "vulkan",
-                providers: [
-                    .apt(["libvulkan-dev", "libwayland-dev", "libxcb1-dev", "libx11-dev"])
-                ]
-            ),
-            .systemLibrary(
-                name: "CShaderc",
-                path: "Sources/CShadercLinux",
-                pkgConfig: "shaderc",
-                providers: [
-                    .apt(["libshaderc-dev"])
-                ]
-            ),
-            .systemLibrary(
-                name: "CSPIRVCross",
-                path: "Sources/CSPIRVCrossLinux",
-                pkgConfig: "spirv-cross-c-shared",
-                providers: [
-                    .apt(["libspirv-cross-c-shared-dev"])
-                ]
-            ),
-            // libwgpu_native.so
+            // libvulkan.so (the Khronos loader), libshaderc_shared.so,
+            // libspirv-cross-c-shared.so, libwgpu_native.so — each built from
+            // the same sources as on the other platforms, none of them the
+            // system's.
             prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            // Vulkan-Headers 1.4.334, as Apple's CVulkan, with every WSI.
+            .target(
+                name: "CVulkan",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CVulkanLinuxPrebuilt",
+                sources: ["stub.c"],
+                publicHeadersPath: "include"
+            ),
+            // shaderc's and spirv-cross's headers: the Android targets', of
+            // the same refs.
+            .target(
+                name: "CShaderc",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CShadercAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+            .target(
+                name: "CSPIRVCross",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CSPIRVCrossAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
             .target(
                 name: "CWgpu",
                 dependencies: ["VulkanLibraries"],

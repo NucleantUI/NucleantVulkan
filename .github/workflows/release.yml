@@ -1,6 +1,6 @@
 # Releases NucleantVulkan, run by hand with the version to release:
 #
-#   1. check     the version is X.Y.Z and not tagged yet;
+#   1. check     the version is X.Y.Z;
 #   2. deps      builds and tests every platform's libraries from source
 #                (build-deps.yml), the archives as artifacts;
 #   3. release   makes the release commit on top of the commit it ran on, and
@@ -13,10 +13,13 @@
 #                    architecture being built;
 #                  * no Dependencies/: the vendored libraries stay on master.
 #                Then pushes the tag and publishes the GitHub release with
-#                the archives;
+#                the archives. A version already released is re-released:
+#                its release and tag are replaced — only now, with everything
+#                built, tested and checked;
 #   4. verify    a new package that depends on the release by its version and
-#                builds against it on Linux: the URLs, checksums and manifest
-#                as a consumer gets them.
+#                builds and runs against it on Linux, in Swift's image with
+#                nothing installed: the URLs, checksums and manifest as a
+#                consumer gets them, and the libraries an app ships.
 #
 # The release commit is on the tag only, never on master. The tag is pushed
 # with GITHUB_TOKEN, so it starts no workflow.
@@ -46,7 +49,7 @@ jobs:
           semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           [[ "$TAG" =~ $semver ]] || { echo "::error::version $TAG is not X.Y.Z"; exit 1; }
           if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" >/dev/null; then
-            echo "::error::$TAG is already tagged"; exit 1
+            echo "::notice::$TAG is released already: it will be re-released"
           fi
 
   deps:
@@ -142,8 +145,12 @@ jobs:
           rm manifest.json
       - name: Tag and publish
         run: |
+          # A re-release replaces the version's release and tag.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
           git tag "$TAG"
-          git push origin "refs/tags/$TAG"
+          git push --force origin "refs/tags/$TAG"
           # A draft until every archive is up, so nobody resolves a release
           # that is missing one.
           gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
@@ -155,10 +162,6 @@ jobs:
     runs-on: ubuntu-24.04
     container: swift:6.3.3-noble
     steps:
-      - name: System packages
-        run: >
-          apt-get update && apt-get install -y
-          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
       - name: Build a package that depends on the release
         run: |
           mkdir -p consumer/Sources/Consumer && cd consumer

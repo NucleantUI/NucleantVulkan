@@ -42,18 +42,19 @@ MOLTENVK_REPO = "https://github.com/KhronosGroup/MoltenVK.git"
 MOLTENVK_REF = "v1.2.11"
 
 VULKAN_LOADER_REPO = "https://github.com/KhronosGroup/Vulkan-Loader.git"
-VULKAN_LOADER_REF = "v1.4.309"
+# The loader the release's Linux artifact bundle ships, at the version of the
+# Vulkan headers every platform compiles against (Sources/CVulkan,
+# Sources/CVulkanLinuxPrebuilt: Vulkan-Headers 1.4.334).
+VULKAN_LOADER_REF = "v1.4.334"
 
 # Apple platforms we package into the xcframework. Each entry maps a
-# fetchDependencies flag to its corresponding `make` target.
+# fetchDependencies flag to its corresponding `make` target. macOS and iOS
+# (iPadOS) only, for now: nothing above NucleantVulkan (Skia, ThorVG) is built
+# for tvOS or visionOS yet.
 MOLTENVK_PLATFORMS = {
     "--macos": "macos",
     "--ios": "ios",
     "--iossim": "iossim",
-    "--tvos": "tvos",
-    "--tvossim": "tvossim",
-    "--visionos": "visionos",
-    "--visionossim": "visionossim",
 }
 
 
@@ -269,23 +270,25 @@ def build_vulkan_loader(work_dir: Path, ref: str, jobs: int) -> None:
     ])
     run(["cmake", "--build", str(build), "--config", "Release", f"-j{jobs}"])
 
-    loader_dir = build / "loader"
-    libs = sorted(loader_dir.glob("libvulkan.so*"))
-    if not libs:
-        sys.exit(f"error: no libvulkan.so produced under {loader_dir}")
+    loader = build / "loader" / "libvulkan.so"
+    if not loader.exists():
+        sys.exit(f"error: no libvulkan.so produced under {loader.parent}")
 
+    # One file, libvulkan.so, made relocatable: SONAME its own name, so an
+    # executable linked with it (-lvulkan) needs exactly the file SwiftPM
+    # copies next to it from the release's artifact bundle, and RUNPATH
+    # $ORIGIN. The driver (ICD) is still the machine's: the loader finds it
+    # through the usual icd.d manifests.
+    require("patchelf")
     dest_dir = DEPENDENCIES_DIR / "linux" / "lib"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    for lib in libs:
-        target = dest_dir / lib.name
-        if target.exists() or target.is_symlink():
-            target.unlink()
-        if lib.is_symlink():
-            os.symlink(os.readlink(lib), target)
-        else:
-            shutil.copy2(lib, target)
-        log(f"installed {target.relative_to(PACKAGE_ROOT)}")
-    log("libvulkan installed")
+    for old in dest_dir.glob("libvulkan.so*"):
+        old.unlink()
+    target = dest_dir / "libvulkan.so"
+    shutil.copy2(loader.resolve(), target)
+    run(["patchelf", "--set-soname", "libvulkan.so", str(target)])
+    run(["patchelf", "--set-rpath", "$ORIGIN", str(target)])
+    log(f"installed {target.relative_to(PACKAGE_ROOT)}")
 
 
 # --- Entry point -----------------------------------------------------------

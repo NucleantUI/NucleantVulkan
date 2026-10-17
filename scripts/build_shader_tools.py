@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Cross-compile shaderc and spirv-cross for Android — or, with --apple, build
-the Apple xcframeworks under Dependencies/macos (see "Apple" below).
+the Apple xcframeworks under Dependencies/macos (see "Apple" below), or, with
+--linux, the shared libraries for the release's Linux artifact bundle (see
+"Linux" below).
 
 These two have no Android story anywhere else in the package: on Linux they are
 apt packages resolved through pkg-config (CShadercLinux / CSPIRVCrossLinux), and
@@ -455,6 +457,91 @@ def main_apple(args) -> int:
     return 0
 
 
+# --- Linux -----------------------------------------------------------------
+#
+# Shared, as on Android, for the release's Linux artifact bundle — the same
+# refs as every other platform, so an app ships these two rather than relying
+# on whatever libshaderc / libspirv-cross a distro has (most have neither):
+#
+#   Dependencies/linux/lib/libshaderc_shared.so         (glslang and
+#                                                        SPIRV-Tools inside)
+#   Dependencies/linux/lib/libspirv-cross-c-shared.so
+#
+# Each made relocatable with patchelf: SONAME the file's own name (SwiftPM
+# copies a bundle's library next to the product under that name, and the
+# executable needs it by SONAME) and RUNPATH $ORIGIN. The headers are the
+# Android targets' (Sources/CShadercAndroid, Sources/CSPIRVCrossAndroid):
+# the same refs, the same files.
+
+
+def native_cmake_build(cmake: Path, ninja: Path, src: Path, build_dir: Path,
+                       extra: list[str], targets: list[str], jobs: int) -> None:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    run([
+        str(cmake), "-S", str(src), "-B", str(build_dir), "-G", "Ninja",
+        f"-DCMAKE_MAKE_PROGRAM={ninja}",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+    ] + extra)
+    run([str(cmake), "--build", str(build_dir), "--parallel", str(jobs), "--target", *targets])
+
+
+def install_relocatable_so(lib: Path, dest_dir: Path) -> Path:
+    """`lib` (resolved) into dest_dir as lib<name>.so, SONAME and RUNPATH
+    patched for loading from beside the executable."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    name = lib.name.split(".so", 1)[0] + ".so"
+    dest = dest_dir / name
+    dest.unlink(missing_ok=True)
+    shutil.copy2(lib.resolve(), dest)
+    run(["patchelf", "--set-soname", name, str(dest)])
+    run(["patchelf", "--set-rpath", "$ORIGIN", str(dest)])
+    log(f"installed -> {dest}")
+    return dest
+
+
+def main_linux(args) -> int:
+    for tool in ("cmake", "ninja", "patchelf", "git"):
+        require(tool)
+    cmake = Path(shutil.which("cmake"))
+    ninja = Path(shutil.which("ninja"))
+    work_dir: Path = args.work_dir.resolve()
+    lib_dir = DEPENDENCIES_DIR / "linux" / "lib"
+
+    if args.only in (None, "shaderc"):
+        src = work_dir / "shaderc"
+        sync_repo(SHADERC_REPO, SHADERC_REF, src)
+        sync_script = src / "utils" / "git-sync-deps"
+        if sync_script.is_file() and not (src / "third_party" / "glslang").is_dir():
+            run([sys.executable, str(sync_script)], cwd=src)
+        build_dir = work_dir / "build" / "shaderc-linux"
+        native_cmake_build(cmake, ninja, src, build_dir, [
+            "-DSHADERC_SKIP_TESTS=ON",
+            "-DSHADERC_SKIP_EXAMPLES=ON",
+            "-DSHADERC_SKIP_COPYRIGHT_CHECK=ON",
+            "-DSPIRV_SKIP_EXECUTABLES=ON",
+            "-DSPIRV_SKIP_TESTS=ON",
+            "-DENABLE_GLSLANG_BINARIES=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
+        ], ["shaderc_shared"], args.jobs)
+        install_relocatable_so(_find_one(build_dir, "libshaderc_shared.so"), lib_dir)
+
+    if args.only in (None, "spirv-cross"):
+        src = work_dir / "SPIRV-Cross"
+        sync_repo(SPIRV_CROSS_REPO, SPIRV_CROSS_REF, src)
+        build_dir = work_dir / "build" / "spirv-cross-linux"
+        native_cmake_build(cmake, ninja, src, build_dir, [
+            "-DSPIRV_CROSS_SHARED=ON",
+            "-DSPIRV_CROSS_STATIC=OFF",
+            "-DSPIRV_CROSS_CLI=OFF",
+            "-DSPIRV_CROSS_ENABLE_TESTS=OFF",
+        ], ["spirv-cross-c-shared"], args.jobs)
+        install_relocatable_so(_find_one(build_dir, "libspirv-cross-c-shared.so"), lib_dir)
+
+    log("done")
+    return 0
+
+
 # --- install helpers -------------------------------------------------------
 
 
@@ -519,7 +606,14 @@ def main() -> int:
                         help="build the Apple xcframeworks (Dependencies/macos) instead of Android")
     parser.add_argument("--slice", choices=list(APPLE_SLICES), default=None,
                         help="with --apple: build just this slice, without packaging")
+    parser.add_argument("--linux", action="store_true",
+                        help="build the Linux shared libraries (Dependencies/linux/lib) instead of Android")
     args = parser.parse_args()
+
+    if args.linux:
+        if args.clean and args.work_dir.exists():
+            shutil.rmtree(args.work_dir)
+        return main_linux(args)
 
     if args.apple:
         if args.clean and args.work_dir.exists():
