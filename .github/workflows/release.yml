@@ -139,20 +139,41 @@ jobs:
       # depended on by version.
       - name: Release manifest
         run: |
-          swift package dump-package > manifest.json
+          # As Linux, each Android ABI and wasm evaluate it (Apple's can only
+          # be evaluated on a Mac; its archive names are fixed).
+          swift package dump-package > linux.json
+          ANDROID_BUILD=1 SWIFT_ANDROID_ABI=arm64-v8a swift package dump-package > android-arm64-v8a.json
+          ANDROID_BUILD=1 SWIFT_ANDROID_ABI=x86_64 swift package dump-package > android-x86_64.json
+          WASM_BUILD=1 swift package dump-package > wasm.json
           python3 - <<'EOF'
-          import json
-          manifest = json.load(open("manifest.json"))
-          assert "unsafeFlags" not in json.dumps(manifest["targets"]), "the release manifest has unsafeFlags"
-          for dependency in manifest["dependencies"]:
-              for kind, (spec, *_) in dependency.items():
-                  requirement = spec.get("requirement", {})
-                  assert kind == "sourceControl" and ("range" in requirement or "exact" in requirement), \
-                      f"{spec.get('identity')}: not depended on by version ({kind} {requirement})"
+          import json, os
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}/"
+          for name in ("linux", "android-arm64-v8a", "android-x86_64", "wasm"):
+              manifest = json.load(open(f"{name}.json"))
+              assert "unsafeFlags" not in json.dumps(manifest["targets"]), f"{name}: the release manifest has unsafeFlags"
+              for dependency in manifest["dependencies"]:
+                  for kind, (spec, *_) in dependency.items():
+                      requirement = spec.get("requirement", {})
+                      assert kind == "sourceControl" and ("range" in requirement or "exact" in requirement), \
+                          f"{name}: {spec.get('identity')}: not depended on by version ({kind} {requirement})"
+              # Every binary target is this release's archive: one left on
+              # Artifacts/ (an archive name with no entry) would not exist
+              # for a consumer.
+              binaries = [t for t in manifest["targets"] if t["type"] == "binary"]
+              assert binaries, f"{name}: no binary targets"
+              for target in binaries:
+                  assert (target.get("url") or "").startswith(base) and target.get("checksum"), \
+                      f"{name}: binary target {target['name']} is not on the release: {target.get('url') or target.get('path')}"
+              print(f"{name}: " + ", ".join(f"{t['name']} <- {t['url'].rsplit('/', 1)[1]}" for t in binaries))
           EOF
-          rm manifest.json
+          rm *.json
       - name: Tag and publish
         run: |
+          # Master as the run found it: the release commit goes on top of it,
+          # so nothing is replaced or published if it moved meanwhile.
+          git fetch -q origin master
+          [ "$(git rev-parse origin/master)" = "$GITHUB_SHA" ] || {
+            echo "::error::master moved during the run: run the release again on the new master"; exit 1; }
           # A re-release replaces the version's release and tag.
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes --cleanup-tag

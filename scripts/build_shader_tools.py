@@ -434,6 +434,7 @@ def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Pat
 def _create_xcframework(arguments: list[str], out: Path) -> None:
     if out.exists():
         shutil.rmtree(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
     run(["xcodebuild", "-create-xcframework", *arguments, "-output", str(out)])
     log(f"installed -> {out}")
 
