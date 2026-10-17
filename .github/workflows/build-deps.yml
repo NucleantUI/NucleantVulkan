@@ -77,6 +77,23 @@ jobs:
         run: python scripts/build_shader_tools.py --apple --slice ios-simulator
       - name: shaderc + spirv-cross xcframeworks
         run: python scripts/build_shader_tools.py --apple
+      # MoltenVK: its dependencies for every platform first (each run of
+      # fetchDependencies cleans MoltenVK), then MoltenVK per platform, each
+      # adding its platform to the xcframework; the last step installs it.
+      - name: MoltenVK dependencies macOS
+        run: python scripts/build_vulkan.py --dependencies macos
+      - name: MoltenVK dependencies iOS
+        run: python scripts/build_vulkan.py --dependencies ios
+      - name: MoltenVK dependencies iOS simulator
+        run: python scripts/build_vulkan.py --dependencies iossim
+      - name: MoltenVK dependencies tvOS
+        run: python scripts/build_vulkan.py --dependencies tvos
+      - name: MoltenVK dependencies tvOS simulator
+        run: python scripts/build_vulkan.py --dependencies tvossim
+      - name: MoltenVK dependencies visionOS
+        run: python scripts/build_vulkan.py --dependencies visionos
+      - name: MoltenVK dependencies visionOS simulator
+        run: python scripts/build_vulkan.py --dependencies visionossim
       - name: MoltenVK macOS
         run: python scripts/build_vulkan.py --platform macos
       - name: MoltenVK iOS
@@ -92,7 +109,13 @@ jobs:
       - name: MoltenVK visionOS simulator
         run: python scripts/build_vulkan.py --platform visionossim
       - name: MoltenVK xcframeworks
-        run: python scripts/build_vulkan.py
+        run: |
+          python scripts/build_vulkan.py --install-only
+          # Every platform made it in: one slice each.
+          plist=Dependencies/macos/MoltenVK.xcframework/Info.plist
+          slices=$(plutil -extract AvailableLibraries raw "$plist")
+          for i in $(seq 0 $((slices - 1))); do plutil -extract "AvailableLibraries.$i.LibraryIdentifier" raw "$plist"; done
+          test "$slices" -eq 7
       - name: Package
         run: |
           mkdir -p dist

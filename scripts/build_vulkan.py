@@ -204,7 +204,12 @@ def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     # of the same project, and parallel ones lock each other's build database
     # ("database is locked"). xcodebuild compiles in parallel by itself.
     run(["make", *MOLTENVK_PLATFORMS.values()], cwd=src)
+    install_moltenvk(src)
 
+
+def install_moltenvk(src: Path) -> None:
+    """The built MoltenVK.xcframework into Dependencies/macos, and
+    MoltenVK_lib.xcframework derived from it."""
     # Prefer the dynamic framework variant (matches the bundled layout: a
     # MoltenVK.framework holding a dylib). Fall back to whatever was emitted.
     candidates = [
@@ -222,15 +227,28 @@ def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     install_moltenvk_lib_xcframework()
 
 
-def build_moltenvk_platform(work_dir: Path, ref: str, jobs: int, platform_flag: str) -> None:
-    """One Apple platform only (fetchDependencies and make for it), without
-    packaging — so a build can go one platform at a time; the plain run
-    after finds each one built."""
+# One platform at a time, in two phases, then --install-only:
+#
+#   --dependencies <platform>   fetchDependencies for it (SPIRV-Cross,
+#                               glslang, ... for that platform)
+#   --platform <platform>       make for it
+#
+# All the --dependencies first: fetchDependencies ends with `make clean` of
+# MoltenVK, which would drop the platforms already made. KEEP_CACHE=Y keeps
+# its own intermediates, where the platforms built before stay staged, so its
+# libraries' xcframeworks grow by one platform each run; each make then adds
+# its platform to MoltenVK.xcframework the same way.
+
+def build_moltenvk_dependencies(work_dir: Path, ref: str, platform_flag: str) -> None:
     require("xcodebuild")
     src = work_dir / "MoltenVK"
     sync_repo(MOLTENVK_REPO, ref, src)
-    run(["./fetchDependencies", platform_flag], cwd=src)
-    run(["make", MOLTENVK_PLATFORMS[platform_flag]], cwd=src)
+    run(["./fetchDependencies", platform_flag], cwd=src, env={**os.environ, "KEEP_CACHE": "Y"})
+
+
+def build_moltenvk_platform(work_dir: Path, platform_flag: str) -> None:
+    require("xcodebuild")
+    run(["make", MOLTENVK_PLATFORMS[platform_flag]], cwd=work_dir / "MoltenVK")
 
 
 # --- Linux: Vulkan-Loader --------------------------------------------------
@@ -285,8 +303,14 @@ def main() -> int:
     parser.add_argument("--repackage-only", action="store_true",
                         help="re-derive MoltenVK_lib.xcframework from the already "
                              "installed MoltenVK.xcframework, without rebuilding")
-    parser.add_argument("--platform", choices=[f.lstrip("-") for f in MOLTENVK_PLATFORMS], default=None,
-                        help="macOS only: build MoltenVK for just this Apple platform, without packaging")
+    platforms = [f.lstrip("-") for f in MOLTENVK_PLATFORMS]
+    parser.add_argument("--dependencies", choices=platforms, default=None,
+                        help="macOS only: build MoltenVK's dependencies for just this platform "
+                             "(all of these before any --platform)")
+    parser.add_argument("--platform", choices=platforms, default=None,
+                        help="macOS only: build MoltenVK for just this platform, without installing")
+    parser.add_argument("--install-only", action="store_true",
+                        help="macOS only: install the MoltenVK.xcframework the --platform runs built")
     args = parser.parse_args()
 
     if args.repackage_only:
@@ -301,8 +325,12 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     system = platform.system()
-    if system == "Darwin" and args.platform:
-        build_moltenvk_platform(work_dir, args.ref or MOLTENVK_REF, args.jobs, f"--{args.platform}")
+    if system == "Darwin" and args.dependencies:
+        build_moltenvk_dependencies(work_dir, args.ref or MOLTENVK_REF, f"--{args.dependencies}")
+    elif system == "Darwin" and args.platform:
+        build_moltenvk_platform(work_dir, f"--{args.platform}")
+    elif system == "Darwin" and args.install_only:
+        install_moltenvk(work_dir / "MoltenVK")
     elif system == "Darwin":
         build_moltenvk(work_dir, args.ref or MOLTENVK_REF, args.jobs)
     elif system == "Linux":
