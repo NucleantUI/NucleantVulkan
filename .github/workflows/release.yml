@@ -1,7 +1,6 @@
 # Releases NucleantVulkan, run by hand with the version to release:
 #
-#   1. check     the version is X.Y.Z and not tagged yet, and NucleantGeometry
-#                has the version the release depends on;
+#   1. check     the version is X.Y.Z and not tagged yet;
 #   2. deps      builds and tests every platform's libraries from source
 #                (build-deps.yml), the archives as artifacts;
 #   3. release   makes the release commit on top of the commit it ran on, and
@@ -12,9 +11,6 @@
 #                    target must carry), which make them binary targets
 #                    that SwiftPM downloads only for the platform and
 #                    architecture being built;
-#                  * NucleantGeometry by version (`from:`) instead of its main
-#                    branch: a package depended on by version may only depend
-#                    on versions itself;
 #                  * no Dependencies/: the vendored libraries stay on master.
 #                Then pushes the tag and publishes the GitHub release with
 #                the archives;
@@ -34,32 +30,24 @@ on:
         description: Version to release, X.Y.Z (the tag)
         type: string
         required: true
-      nucleant-geometry:
-        description: NucleantGeometry version the release depends on (from:)
-        type: string
-        required: true
 
 permissions:
   contents: write
 
 env:
   TAG: ${{ inputs.version }}
-  NUCLEANT_GEOMETRY: ${{ inputs.nucleant-geometry }}
 
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - name: Version and dependencies
+      - name: Version
         run: |
           semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           [[ "$TAG" =~ $semver ]] || { echo "::error::version $TAG is not X.Y.Z"; exit 1; }
-          [[ "$NUCLEANT_GEOMETRY" =~ $semver ]] || { echo "::error::NucleantGeometry $NUCLEANT_GEOMETRY is not X.Y.Z"; exit 1; }
           if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" >/dev/null; then
             echo "::error::$TAG is already tagged"; exit 1
           fi
-          git ls-remote --exit-code --tags https://github.com/NucleantUI/NucleantGeometry "refs/tags/$NUCLEANT_GEOMETRY" >/dev/null \
-            || { echo "::error::NucleantGeometry has no tag $NUCLEANT_GEOMETRY"; exit 1; }
 
   deps:
     needs: check
@@ -125,10 +113,6 @@ jobs:
           assert empty in text, "Package.swift has no empty releasedVulkan to fill in"
           text = text.replace(empty, empty.replace("[:]", "[\n" + entries + "]"))
 
-          branch = '.package(url: "https://github.com/NucleantUI/NucleantGeometry", branch: "main")'
-          assert branch in text, "Package.swift has no NucleantGeometry main-branch dependency to replace"
-          text = text.replace(branch, branch.replace('branch: "main"', f'from: "{os.environ["NUCLEANT_GEOMETRY"]}"'))
-
           manifest.write_text(text)
           EOF
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -139,14 +123,22 @@ jobs:
           git add Package.swift
           git commit -q -m "Release $TAG: libraries from the release's archives"
       # The manifest as a consumer evaluates it (no sibling NucleantGeometry
-      # here, so not local): it must evaluate, and without unsafeFlags, which
-      # SwiftPM refuses in a package depended on by version.
+      # here, so not local): it must evaluate, without unsafeFlags, and with
+      # every dependency by version, as SwiftPM requires of a package
+      # depended on by version.
       - name: Release manifest
         run: |
           swift package dump-package > manifest.json
-          if grep -q unsafeFlags manifest.json; then
-            echo "::error::the release manifest has unsafeFlags"; exit 1
-          fi
+          python3 - <<'EOF'
+          import json
+          manifest = json.load(open("manifest.json"))
+          assert "unsafeFlags" not in json.dumps(manifest["targets"]), "the release manifest has unsafeFlags"
+          for dependency in manifest["dependencies"]:
+              for kind, (spec, *_) in dependency.items():
+                  requirement = spec.get("requirement", {})
+                  assert kind == "sourceControl" and ("range" in requirement or "exact" in requirement), \
+                      f"{spec.get('identity')}: not depended on by version ({kind} {requirement})"
+          EOF
           rm manifest.json
       - name: Tag and publish
         run: |
@@ -155,7 +147,7 @@ jobs:
           # A draft until every archive is up, so nobody resolves a release
           # that is missing one.
           gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
-            --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for. Depends on NucleantGeometry $NUCLEANT_GEOMETRY."
+            --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for."
           gh release edit "$TAG" --draft=false
 
   verify:

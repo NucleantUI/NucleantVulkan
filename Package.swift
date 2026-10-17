@@ -352,7 +352,7 @@ func getDependencies() -> [Package.Dependency] {
     if localDev {
         deps.append(.package(path: "../NucleantGeometry"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/NucleantGeometry", branch: "main"))
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantGeometry", from: "0.0.1"))
     }
     return deps
 }
