@@ -1,6 +1,6 @@
 # Releases NucleantVulkan, run by hand with the version to release:
 #
-#   1. check     the version is X.Y.Z and not tagged yet, and SulphurGeometry
+#   1. check     the version is X.Y.Z and not tagged yet, and NucleantGeometry
 #                has the version the release depends on;
 #   2. deps      builds and tests every platform's libraries from source
 #                (build-deps.yml), the archives as artifacts;
@@ -12,7 +12,7 @@
 #                    target must carry), which make them binary targets
 #                    that SwiftPM downloads only for the platform and
 #                    architecture being built;
-#                  * SulphurGeometry by version (`from:`) instead of its main
+#                  * NucleantGeometry by version (`from:`) instead of its main
 #                    branch: a package depended on by version may only depend
 #                    on versions itself;
 #                  * no Dependencies/: the vendored libraries stay on master.
@@ -34,8 +34,8 @@ on:
         description: Version to release, X.Y.Z (the tag)
         type: string
         required: true
-      sulphur-geometry:
-        description: SulphurGeometry version the release depends on (from:)
+      nucleant-geometry:
+        description: NucleantGeometry version the release depends on (from:)
         type: string
         required: true
 
@@ -44,7 +44,7 @@ permissions:
 
 env:
   TAG: ${{ inputs.version }}
-  SULPHUR_GEOMETRY: ${{ inputs.sulphur-geometry }}
+  NUCLEANT_GEOMETRY: ${{ inputs.nucleant-geometry }}
 
 jobs:
   check:
@@ -54,12 +54,12 @@ jobs:
         run: |
           semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           [[ "$TAG" =~ $semver ]] || { echo "::error::version $TAG is not X.Y.Z"; exit 1; }
-          [[ "$SULPHUR_GEOMETRY" =~ $semver ]] || { echo "::error::SulphurGeometry $SULPHUR_GEOMETRY is not X.Y.Z"; exit 1; }
+          [[ "$NUCLEANT_GEOMETRY" =~ $semver ]] || { echo "::error::NucleantGeometry $NUCLEANT_GEOMETRY is not X.Y.Z"; exit 1; }
           if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" >/dev/null; then
             echo "::error::$TAG is already tagged"; exit 1
           fi
-          git ls-remote --exit-code --tags https://github.com/NucleantUI/SulphurGeometry "refs/tags/$SULPHUR_GEOMETRY" >/dev/null \
-            || { echo "::error::SulphurGeometry has no tag $SULPHUR_GEOMETRY"; exit 1; }
+          git ls-remote --exit-code --tags https://github.com/NucleantUI/NucleantGeometry "refs/tags/$NUCLEANT_GEOMETRY" >/dev/null \
+            || { echo "::error::NucleantGeometry has no tag $NUCLEANT_GEOMETRY"; exit 1; }
 
   deps:
     needs: check
@@ -125,9 +125,9 @@ jobs:
           assert empty in text, "Package.swift has no empty releasedVulkan to fill in"
           text = text.replace(empty, empty.replace("[:]", "[\n" + entries + "]"))
 
-          branch = '.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "main")'
-          assert branch in text, "Package.swift has no SulphurGeometry main-branch dependency to replace"
-          text = text.replace(branch, branch.replace('branch: "main"', f'from: "{os.environ["SULPHUR_GEOMETRY"]}"'))
+          branch = '.package(url: "https://github.com/NucleantUI/NucleantGeometry", branch: "main")'
+          assert branch in text, "Package.swift has no NucleantGeometry main-branch dependency to replace"
+          text = text.replace(branch, branch.replace('branch: "main"', f'from: "{os.environ["NUCLEANT_GEOMETRY"]}"'))
 
           manifest.write_text(text)
           EOF
@@ -138,7 +138,7 @@ jobs:
           git rm -r -q Dependencies
           git add Package.swift
           git commit -q -m "Release $TAG: libraries from the release's archives"
-      # The manifest as a consumer evaluates it (no sibling SulphurGeometry
+      # The manifest as a consumer evaluates it (no sibling NucleantGeometry
       # here, so not local): it must evaluate, and without unsafeFlags, which
       # SwiftPM refuses in a package depended on by version.
       - name: Release manifest
@@ -155,7 +155,7 @@ jobs:
           # A draft until every archive is up, so nobody resolves a release
           # that is missing one.
           gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
-            --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for. Depends on SulphurGeometry $SULPHUR_GEOMETRY."
+            --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for. Depends on NucleantGeometry $NUCLEANT_GEOMETRY."
           gh release edit "$TAG" --draft=false
 
   verify:

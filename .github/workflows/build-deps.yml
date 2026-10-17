@@ -39,7 +39,7 @@ on:
 env:
   SWIFT_VERSION: 6.3.3
   VERSION: ${{ inputs.version || '0.0.0' }}
-  # SulphurGeometry from GitHub; there is no sibling checkout here anyway.
+  # NucleantGeometry from GitHub; there is no sibling checkout here anyway.
   NUCLEANT_LOCAL_DEV: "0"
   # Package.swift takes the libraries from Artifacts/, where the tests put them.
   NUCLEANT_VULKAN_ARTIFACTS: "1"

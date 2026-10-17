@@ -4,7 +4,7 @@
 import Foundation
 import PackageDescription
 
-/// Build against the sibling checkouts (`../SulphurGeometry`) or against GitHub.
+/// Build against the sibling checkouts (`../NucleantGeometry`) or against GitHub.
 ///
 /// Decided the same way in every Nucleant package, so one setting covers the
 /// whole chain: `NUCLEANT_LOCAL_DEV=1|0` in the environment wins; otherwise
@@ -18,7 +18,7 @@ let localDev: Bool = {
         return ["1", "true", "yes"].contains(flag.lowercased())
     }
     let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("SulphurGeometry").path)
+    return FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantGeometry").path)
 }()
 
 func getPlatformTarget() -> PackageDescription.Platform {
@@ -350,9 +350,9 @@ func prebuiltVulkanTargets() -> [Target] {
 func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
     if localDev {
-        deps.append(.package(path: "../SulphurGeometry"))
+        deps.append(.package(path: "../NucleantGeometry"))
     } else {
-        deps.append(.package(url: "https://github.com/NucleantUI/SulphurGeometry", branch: "main"))
+        deps.append(.package(url: "https://github.com/NucleantUI/NucleantGeometry", branch: "main"))
     }
     return deps
 }
@@ -734,7 +734,7 @@ func mainTargets() -> [Target] {
             name: "VulkanCore",
             dependencies: [
                 "CVulkan",
-                .product(name: "SulphurGeometry", package: "SulphurGeometry")
+                .product(name: "NucleantGeometry", package: "NucleantGeometry")
             ]
         ),
         .target(
