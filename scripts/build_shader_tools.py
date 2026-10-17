@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Cross-compile shaderc and spirv-cross for Android.
+"""Cross-compile shaderc and spirv-cross for Android — or, with --apple, build
+the Apple xcframeworks under Dependencies/macos (see "Apple" below).
 
 These two have no Android story anywhere else in the package: on Linux they are
 apt packages resolved through pkg-config (CShadercLinux / CSPIRVCrossLinux), and
@@ -262,6 +263,190 @@ def build_spirv_cross(cmake: Path, ninja: Path, work_dir: Path, ndk: Path, abi: 
     _install_header(src / "spirv_cross_c.h", SPIRV_CROSS_TARGET_INCLUDE)
 
 
+# --- Apple -----------------------------------------------------------------
+#
+# On Apple's platforms both are static and packaged as the xcframeworks the
+# Apple branch of Package.swift takes from Dependencies/macos:
+#
+#   shaderc.xcframework      shaderc.framework per slice — a static framework
+#                            (libshaderc_combined: shaderc + glslang +
+#                            SPIRV-Tools), module `shaderc`
+#   spirv-cross.xcframework  libspirv-cross.a (every libspirv-cross-*.a,
+#                            merged) + spirv_cross_c.h / spirv.h
+#
+# with three slices: macOS (arm64 + x86_64), iOS, iOS simulator
+# (arm64 + x86_64) — each one CMake build, CMAKE_OSX_ARCHITECTURES giving
+# both architectures at once.
+
+# slice -> (CMAKE_SYSTEM_NAME or None for the host, sysroot, architectures,
+#           deployment target — Package.swift's macOS 14 / iOS 17)
+APPLE_SLICES = {
+    "macos": (None, "macosx", "arm64;x86_64", "14.0"),
+    "ios": ("iOS", "iphoneos", "arm64", "17.0"),
+    "ios-simulator": ("iOS", "iphonesimulator", "arm64;x86_64", "17.0"),
+}
+
+SHADERC_HEADERS = ("shaderc.h", "env.h", "status.h", "visibility.h")
+
+SHADERC_FRAMEWORK_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>shaderc</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.google.shaderc</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>shaderc</string>
+    <key>CFBundlePackageType</key>
+    <string>FMWK</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{version}</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+</dict>
+</plist>
+"""
+
+SHADERC_MODULEMAP = """framework module shaderc {
+    header "shaderc.h"
+    header "env.h"
+    header "status.h"
+    header "visibility.h"
+    export *
+}
+"""
+
+
+def apple_cmake_build(cmake: Path, ninja: Path, src: Path, build_dir: Path, slice_name: str,
+                      extra: list[str], targets: list[str], jobs: int) -> None:
+    system_name, sysroot, archs, deployment = APPLE_SLICES[slice_name]
+    build_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(cmake), "-S", str(src), "-B", str(build_dir), "-G", "Ninja",
+        f"-DCMAKE_MAKE_PROGRAM={ninja}",
+        "-DCMAKE_BUILD_TYPE=Release",
+        f"-DCMAKE_OSX_SYSROOT={sysroot}",
+        f"-DCMAKE_OSX_ARCHITECTURES={archs}",
+        f"-DCMAKE_OSX_DEPLOYMENT_TARGET={deployment}",
+    ]
+    if system_name:
+        command.append(f"-DCMAKE_SYSTEM_NAME={system_name}")
+    run(command + extra)
+    run([str(cmake), "--build", str(build_dir), "--parallel", str(jobs), "--target", *targets])
+
+
+def build_shaderc_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int) -> None:
+    src = work_dir / "shaderc"
+    sync_repo(SHADERC_REPO, SHADERC_REF, src)
+    sync_script = src / "utils" / "git-sync-deps"
+    if sync_script.is_file() and not (src / "third_party" / "glslang").is_dir():
+        run([sys.executable, str(sync_script)], cwd=src)
+
+    frameworks = []
+    for slice_name in APPLE_SLICES:
+        build_dir = work_dir / "build" / f"shaderc-apple-{slice_name}"
+        # Only the combined static library: the tools are executables, which
+        # an iOS build would have to sign.
+        apple_cmake_build(cmake, ninja, src, build_dir, slice_name, [
+            "-DSHADERC_SKIP_TESTS=ON",
+            "-DSHADERC_SKIP_EXAMPLES=ON",
+            "-DSHADERC_SKIP_COPYRIGHT_CHECK=ON",
+            "-DSPIRV_SKIP_EXECUTABLES=ON",
+            "-DSPIRV_SKIP_TESTS=ON",
+            "-DENABLE_GLSLANG_BINARIES=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
+        ], ["shaderc_combined"], jobs)
+        archive = _find_one(build_dir, "libshaderc_combined.a")
+        frameworks.append(_shaderc_framework(archive, src, stage / "shaderc" / slice_name, slice_name))
+
+    out = DEPENDENCIES_DIR / "macos" / "shaderc.xcframework"
+    _create_xcframework([arg for fw in frameworks for arg in ("-framework", str(fw))], out)
+
+
+def _shaderc_framework(archive: Path, src: Path, dest: Path, slice_name: str) -> Path:
+    """shaderc.framework around the static archive: versioned on macOS
+    (Versions/A, with the top-level symlinks), flat on iOS."""
+    framework = dest / "shaderc.framework"
+    if framework.exists():
+        shutil.rmtree(framework)
+    contents = framework / "Versions" / "A" if slice_name == "macos" else framework
+    (contents / "Headers").mkdir(parents=True)
+    (contents / "Modules").mkdir()
+    shutil.copy2(archive, contents / "shaderc")
+    for header in SHADERC_HEADERS:
+        shutil.copy2(src / "libshaderc" / "include" / "shaderc" / header, contents / "Headers" / header)
+    (contents / "Modules" / "module.modulemap").write_text(SHADERC_MODULEMAP)
+    plist = SHADERC_FRAMEWORK_PLIST.format(version=SHADERC_REF.lstrip("v"))
+    if slice_name == "macos":
+        (contents / "Resources").mkdir()
+        (contents / "Resources" / "Info.plist").write_text(plist)
+        os.symlink("A", framework / "Versions" / "Current")
+        for name in ("shaderc", "Headers", "Modules", "Resources"):
+            os.symlink(f"Versions/Current/{name}", framework / name)
+    else:
+        (contents / "Info.plist").write_text(plist)
+    return framework
+
+
+def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int) -> None:
+    src = work_dir / "SPIRV-Cross"
+    sync_repo(SPIRV_CROSS_REPO, SPIRV_CROSS_REF, src)
+
+    headers = stage / "spirv-cross-headers"
+    if headers.exists():
+        shutil.rmtree(headers)
+    headers.mkdir(parents=True)
+    for header in ("spirv_cross_c.h", "spirv.h"):
+        shutil.copy2(src / header, headers / header)
+
+    arguments = []
+    for slice_name in APPLE_SLICES:
+        build_dir = work_dir / "build" / f"spirv-cross-apple-{slice_name}"
+        apple_cmake_build(cmake, ninja, src, build_dir, slice_name, [
+            "-DSPIRV_CROSS_STATIC=ON",
+            "-DSPIRV_CROSS_SHARED=OFF",
+            "-DSPIRV_CROSS_CLI=OFF",
+            "-DSPIRV_CROSS_ENABLE_TESTS=OFF",
+        ], ["spirv-cross-c"], jobs)
+        archives = sorted(build_dir.glob("libspirv-cross-*.a"))
+        if not archives:
+            sys.exit(f"error: no libspirv-cross-*.a under {build_dir}")
+        merged = stage / "spirv-cross" / slice_name / "libspirv-cross.a"
+        merged.parent.mkdir(parents=True, exist_ok=True)
+        merged.unlink(missing_ok=True)
+        run(["libtool", "-static", "-no_warning_for_no_symbols", "-o", str(merged), *map(str, archives)])
+        arguments += ["-library", str(merged), "-headers", str(headers)]
+
+    _create_xcframework(arguments, DEPENDENCIES_DIR / "macos" / "spirv-cross.xcframework")
+
+
+def _create_xcframework(arguments: list[str], out: Path) -> None:
+    if out.exists():
+        shutil.rmtree(out)
+    run(["xcodebuild", "-create-xcframework", *arguments, "-output", str(out)])
+    log(f"installed -> {out}")
+
+
+def main_apple(args) -> int:
+    for tool in ("cmake", "ninja", "xcodebuild", "libtool"):
+        require(tool)
+    cmake = Path(shutil.which("cmake"))
+    ninja = Path(shutil.which("ninja"))
+    work_dir: Path = args.work_dir.resolve()
+    stage = work_dir / "stage-apple"
+    if args.only in (None, "shaderc"):
+        build_shaderc_apple(cmake, ninja, work_dir, stage, args.jobs)
+    if args.only in (None, "spirv-cross"):
+        build_spirv_cross_apple(cmake, ninja, work_dir, stage, args.jobs)
+    log("done")
+    return 0
+
+
 # --- install helpers -------------------------------------------------------
 
 
@@ -322,8 +507,14 @@ def main() -> int:
                         help="build just one of the two")
     parser.add_argument("--clean", action="store_true",
                         help="wipe the work directory before building")
+    parser.add_argument("--apple", action="store_true",
+                        help="build the Apple xcframeworks (Dependencies/macos) instead of Android")
     args = parser.parse_args()
 
+    if args.apple:
+        if args.clean and args.work_dir.exists():
+            shutil.rmtree(args.work_dir)
+        return main_apple(args)
 
     abis = [a.strip() for a in args.abis.split(",") if a.strip()]
     unknown = [a for a in abis if a not in ANDROID_ABIS]

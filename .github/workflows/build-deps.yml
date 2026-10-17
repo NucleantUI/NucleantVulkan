@@ -1,0 +1,230 @@
+# Builds NucleantVulkan's libraries for every platform from source, packages
+# them as the archives its binary targets take, and builds and tests the
+# package against them — one machine per platform, which builds, packages and
+# tests:
+#
+#   apple    MoltenVK, MoltenVK_lib, wgpu_native, wgpu_native_framework,
+#            shaderc, spirv-cross  (.xcframework.zip each)
+#   linux    nucleantvulkan-linux-x86_64.artifactbundle.zip      libwgpu_native.so
+#   android  nucleantvulkan-android-<abi>.artifactbundle.zip     libwgpu_native.so,
+#            libshaderc_shared.so, libspirv-cross-c-shared.so
+#   wasm     nucleantvulkan-wasm32.artifactbundle.zip            shaderc, spirv-cross
+#
+# Linux and Android keep their libraries shared inside the bundles (see
+# scripts/make_artifactbundle.py); Linux takes shaderc and spirv-cross from
+# apt, as before.
+#
+# The archives are this run's artifacts ("vulkan-*"). Run it by hand to check
+# that the dependencies still build; a release workflow will run it for each
+# tag and attach the archives to the release.
+
+name: build-deps
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to build (all, or one to retry)
+        type: choice
+        options: [all, apple, linux, android, wasm]
+        default: all
+  workflow_call:
+    inputs:
+      version:
+        description: Version written into the artifact bundles' info.json
+        type: string
+        default: 0.0.0
+
+env:
+  SWIFT_VERSION: 6.3.3
+  VERSION: ${{ inputs.version || '0.0.0' }}
+  # SulphurGeometry from GitHub; there is no sibling checkout here anyway.
+  NUCLEANT_LOCAL_DEV: "0"
+  # Package.swift takes the libraries from Artifacts/, where the tests put them.
+  NUCLEANT_VULKAN_ARTIFACTS: "1"
+
+jobs:
+  apple:
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'apple'
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: brew install ninja
+      - name: wgpu-native
+        run: python scripts/build_wgpu.py
+      - name: shaderc and spirv-cross
+        run: python scripts/build_shader_tools.py --apple
+      # Every Apple platform MoltenVK builds; the longest step.
+      - name: MoltenVK
+        run: python scripts/build_vulkan.py
+      - name: Package
+        run: |
+          mkdir -p dist
+          for x in MoltenVK MoltenVK_lib wgpu_native wgpu_native_framework shaderc spirv-cross; do
+            ditto -c -k --keepParent "Dependencies/macos/$x.xcframework" "dist/$x.xcframework.zip"
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-apple
+          path: dist/*.zip
+      - name: Install Swift ${{ env.SWIFT_VERSION }}
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          curl -fsSLO "https://download.swift.org/swift-${SWIFT_VERSION}-release/xcode/${release}/${release}-osx.pkg"
+          installer -pkg "${release}-osx.pkg" -target CurrentUserHomeDirectory
+          echo "$HOME/Library/Developer/Toolchains/${release}.xctoolchain/usr/bin" >> "$GITHUB_PATH"
+      - name: Test against them
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          swift test
+
+  linux:
+    # x86_64, as Dependencies/linux. In Swift's own image, which has the
+    # toolchain.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-24.04
+    container: swift:6.3.3-noble
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      # wgpu-native's build (Rust; bindgen needs libclang), and the system
+      # libraries the package links on Linux.
+      - name: System packages
+        run: >
+          apt-get update && apt-get install -y
+          curl python3 pkg-config clang libclang-dev
+          libvulkan-dev libwayland-dev libxcb1-dev libx11-dev libshaderc-dev libspirv-cross-c-shared-dev
+      - name: Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: wgpu-native
+        run: |
+          rm -rf Dependencies/linux/lib
+          python3 scripts/build_wgpu.py --prefix Dependencies/linux
+      - name: Package
+        run: >
+          python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-gnu
+          --library Dependencies/linux/lib/libwgpu_native.so
+          --name nucleantvulkan-linux-x86_64 --output dist --version "$VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-linux
+          path: dist/*.zip
+      - name: Test against it
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          swift test
+
+  android:
+    # Both ABIs on one machine, in Swift's image for the cross-compile after.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'android'
+    runs-on: ubuntu-24.04
+    container: swift:6.3.3-noble
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - run: >
+          apt-get update && apt-get install -y
+          g++ curl unzip python3 cmake ninja-build pkg-config clang libclang-dev
+      - name: Rust
+        run: |
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # NDK r28, as Skia's Android build.
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r28c
+          add-to-path: false
+      - run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
+      - name: wgpu-native
+        run: |
+          rm -rf Dependencies/android
+          python3 scripts/build_wgpu.py --android --abis arm64-v8a,x86_64
+      - name: shaderc and spirv-cross
+        run: python3 scripts/build_shader_tools.py --abis arm64-v8a,x86_64
+      - name: Package
+        run: |
+          for abi in arm64-v8a x86_64; do
+            case "$abi" in arm64-v8a) arch=aarch64 ;; x86_64) arch=x86_64 ;; esac
+            lib="Dependencies/android/$abi/lib"
+            python3 scripts/make_artifactbundle.py --triple "$arch-unknown-linux-android28" \
+              --library "$lib/libwgpu_native.so" \
+              --library "$lib/libshaderc_shared.so" \
+              --library "$lib/libspirv-cross-c-shared.so" \
+              --name "nucleantvulkan-android-$abi" --output dist --version "$VERSION"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-android
+          path: dist/*.zip
+      - name: Swift's Android SDK
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          swift sdk install \
+            "https://download.swift.org/swift-${SWIFT_VERSION}-release/android-sdk/${release}/${release}_android.artifactbundle.tar.gz" \
+            --checksum d160cc3206dd1886dae3fef2337af5e25ec034692cd0ec225721c56cc69da7f5
+          # Links the NDK's sysroot into the SDK.
+          setup=$(find "$HOME" -path "*${release}_android.artifactbundle*" -name setup-android-sdk.sh 2>/dev/null | head -1)
+          echo "setup script: $setup"
+          test -n "$setup" && "$setup"
+      # Cross-compiled: builds and links the tests, which no device runs here.
+      - name: Build against them
+        env:
+          ANDROID_BUILD: "1"
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          for abi in arm64-v8a x86_64; do
+            case "$abi" in arm64-v8a) arch=aarch64 ;; x86_64) arch=x86_64 ;; esac
+            SWIFT_ANDROID_ABI="$abi" swift build --swift-sdk "$arch-unknown-linux-android28" --build-tests
+          done
+
+  wasm:
+    # build_shader_tools_wasm.py compiles with the clang of the swift.org
+    # toolchain matching the wasm SDK, from ~/Library/Developer/Toolchains.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'wasm'
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Swift ${{ env.SWIFT_VERSION }} and its wasm SDK
+        run: |
+          release="swift-${SWIFT_VERSION}-RELEASE"
+          curl -fsSLO "https://download.swift.org/swift-${SWIFT_VERSION}-release/xcode/${release}/${release}-osx.pkg"
+          installer -pkg "${release}-osx.pkg" -target CurrentUserHomeDirectory
+          bin="$HOME/Library/Developer/Toolchains/${release}.xctoolchain/usr/bin"
+          "$bin/swift" sdk install \
+            "https://download.swift.org/swift-${SWIFT_VERSION}-release/wasm-sdk/${release}/${release}_wasm.artifactbundle.tar.gz" \
+            --checksum cabfa08b73bb8ac783927ecd15fa386e99d0c139c5f232445067bcf58379cae7
+          echo "TOOLCHAIN_BIN=$bin" >> "$GITHUB_ENV"
+      - run: brew install ninja
+      - name: shaderc and spirv-cross
+        run: |
+          rm -rf Dependencies/wasm
+          python scripts/build_shader_tools_wasm.py
+      - name: Package
+        run: |
+          lib=Dependencies/wasm/lib
+          spirv_cross=$(ls $lib/libspirv-cross-*.a | paste -sd, -)
+          python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1 \
+            --library "$lib/libshaderc_combined.a" \
+            --library "libspirv-cross.a=$spirv_cross" \
+            --name nucleantvulkan-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-wasm32
+          path: dist/*.zip
+      # In headless Chrome on the page's WebGPU.
+      - name: Test against it
+        run: |
+          mkdir -p Artifacts && cp dist/*.zip Artifacts/
+          python scripts/run_wasm_tests.py

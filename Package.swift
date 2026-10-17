@@ -106,6 +106,246 @@ let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
 // fallback.
 let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_ANDROID_USE_AHARDWAREBUFFER"] == "1"
 
+/// Each prebuilt archive on this release's GitHub release, by file name: its
+/// URL and checksum. Written here by the release workflow on the release
+/// commit — in this file, not one it reads, because SwiftPM caches a
+/// manifest's evaluation by its text (and environment), not by the files it
+/// looks at. Empty on master.
+let releasedVulkan: [String: (url: String, checksum: String)] = [:]
+
+/// The libraries come prebuilt: from the release (above), or, with
+/// NUCLEANT_VULKAN_ARTIFACTS=1, from Artifacts/ — the archives
+/// .github/workflows/build-deps.yml builds, put there to build and test
+/// against. Otherwise they come from the vendored Dependencies/.
+let prebuiltVulkan = !releasedVulkan.isEmpty
+    || ProcessInfo.processInfo.environment["NUCLEANT_VULKAN_ARTIFACTS"] == "1"
+
+/// A prebuilt archive as a binary target: the release's URL, else Artifacts/.
+func prebuiltBinary(_ name: String, _ archive: String) -> Target {
+    if let release = releasedVulkan[archive] {
+        return .binaryTarget(name: name, url: release.url, checksum: release.checksum)
+    }
+    return .binaryTarget(name: name, path: "Artifacts/\(archive)")
+}
+
+/// The vendored libraries of Linux, Android and wasm, as one artifact bundle
+/// per platform and architecture (scripts/make_artifactbundle.py). On Linux
+/// and Android the bundle holds the shared libraries themselves — SwiftPM
+/// copies them next to the product and links them, so libwgpu_native.so stays
+/// the one copy ThorVG's library links too.
+func prebuiltLibrariesArchive() -> String {
+    switch platformTarget {
+    case .wasi:
+        return "nucleantvulkan-wasm32.artifactbundle.zip"
+    case .android:
+        return "nucleantvulkan-android-\(androidABI()).artifactbundle.zip"
+    default:
+        // Linux builds are native, so the host's architecture is the target's.
+#if arch(arm64)
+        return "nucleantvulkan-linux-aarch64.artifactbundle.zip"
+#else
+        return "nucleantvulkan-linux-x86_64.artifactbundle.zip"
+#endif
+    }
+}
+
+/// vulkanTargets() over the prebuilt libraries. No unsafeFlags — SwiftPM
+/// refuses them in a package depended on by version — so the binary targets
+/// give the libraries and the C targets keep only their own headers.
+func prebuiltVulkanTargets() -> [Target] {
+    switch platformTarget {
+    case .linux:
+        return [
+            .systemLibrary(
+                name: "CVulkan",
+                path: "Sources/CVulkanLinux",
+                pkgConfig: "vulkan",
+                providers: [
+                    .apt(["libvulkan-dev", "libwayland-dev", "libxcb1-dev", "libx11-dev"])
+                ]
+            ),
+            .systemLibrary(
+                name: "CShaderc",
+                path: "Sources/CShadercLinux",
+                pkgConfig: "shaderc",
+                providers: [
+                    .apt(["libshaderc-dev"])
+                ]
+            ),
+            .systemLibrary(
+                name: "CSPIRVCross",
+                path: "Sources/CSPIRVCrossLinux",
+                pkgConfig: "spirv-cross-c-shared",
+                providers: [
+                    .apt(["libspirv-cross-c-shared-dev"])
+                ]
+            ),
+            // libwgpu_native.so
+            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            .target(
+                name: "CWgpu",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CWgpuLinux",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+        ]
+    case .android:
+        return [
+            .systemLibrary(
+                name: "CVulkan",
+                path: "Sources/CVulkanAndroid"
+            ),
+            // libshaderc_shared.so, libspirv-cross-c-shared.so,
+            // libwgpu_native.so — staged into the app as before.
+            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            .target(
+                name: "CShaderc",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CShadercAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+            .target(
+                name: "CSPIRVCross",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CSPIRVCrossAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+            .target(
+                name: "CWgpu",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CWgpuLinux",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+        ]
+    case .wasi:
+        return [
+            .target(
+                name: "CVulkan",
+                path: "Sources/CVulkanWasm",
+                sources: [
+                    "vkw_device.c",
+                    "vkw_memory.c",
+                    "vkw_descriptor.c",
+                    "vkw_pipeline.c",
+                    "vkw_command.c",
+                    "vkw_queue.c",
+                ],
+                publicHeadersPath: "include"
+            ),
+            // libshaderc_combined.a, libspirv-cross.a (static: the browser
+            // has no loader).
+            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            .target(
+                name: "CShaderc",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CShadercWasm",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("c++"),
+                ]
+            ),
+            .target(
+                name: "CSPIRVCross",
+                dependencies: ["VulkanLibraries"],
+                path: "Sources/CSPIRVCrossWasm",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ],
+                linkerSettings: [
+                    .linkedLibrary("c++"),
+                ]
+            ),
+            .target(
+                name: "CWgpu",
+                path: "Sources/CWgpuWasm",
+                sources: ["webgpu_wasm.c"],
+                publicHeadersPath: "include"
+            ),
+        ]
+    default:
+        var targets: [Target] = [prebuiltBinary("MoltenVK", "MoltenVK.xcframework.zip")]
+        if PIP_MODE {
+            targets.append(prebuiltBinary("MoltenVKLib", "MoltenVK_lib.xcframework.zip"))
+        }
+        targets += [
+            .target(
+                name: "CVulkan",
+                dependencies: PIP_MODE ? [
+                    .byName(
+                        name: "MoltenVKLib",
+                        condition: .when(platforms: [.macOS])
+                    ),
+                    .byName(
+                        name: "MoltenVK",
+                        condition: .when(platforms: [.iOS, .tvOS, .macCatalyst])
+                    )
+                ] : [
+                    .byName(
+                        name: "MoltenVK",
+                        condition: .when(platforms: [.iOS, .macOS, .tvOS, .macCatalyst])
+                    )
+                ],
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath(".")
+                ]
+            ),
+            prebuiltBinary("CWgpu", "wgpu_native.xcframework.zip"),
+            prebuiltBinary("CWgpuFW", "wgpu_native_framework.xcframework.zip"),
+            prebuiltBinary("shaderc", "shaderc.xcframework.zip"),
+            prebuiltBinary("spirv-cross", "spirv-cross.xcframework.zip"),
+            .target(
+                name: "CShaderc",
+                dependencies: ["shaderc"],
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath(".")
+                ],
+                linkerSettings: [
+                    .linkedLibrary("c++")
+                ]
+            ),
+            .target(
+                name: "CSPIRVCross",
+                dependencies: ["spirv-cross"],
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath(".")
+                ],
+                linkerSettings: [
+                    .linkedLibrary("c++")
+                ]
+            ),
+        ]
+        return targets
+    }
+}
+
 
 func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
@@ -120,8 +360,11 @@ func getDependencies() -> [Package.Dependency] {
 
 
 func vulkanTargets() -> [Target] {
+    if prebuiltVulkan {
+        return prebuiltVulkanTargets()
+    }
     var targets: [Target] = []
-    
+
     switch platformTarget {
     case let p where p == .linux:
         // System Vulkan loader via pkg-config.
