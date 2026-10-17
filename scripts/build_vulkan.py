@@ -219,6 +219,17 @@ def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     install_moltenvk_lib_xcframework()
 
 
+def build_moltenvk_platform(work_dir: Path, ref: str, jobs: int, platform_flag: str) -> None:
+    """One Apple platform only (fetchDependencies and make for it), without
+    packaging — so a build can go one platform at a time; the plain run
+    after finds each one built."""
+    require("xcodebuild")
+    src = work_dir / "MoltenVK"
+    sync_repo(MOLTENVK_REPO, ref, src)
+    run(["./fetchDependencies", platform_flag], cwd=src)
+    run(["make", MOLTENVK_PLATFORMS[platform_flag], f"-j{jobs}"], cwd=src)
+
+
 # --- Linux: Vulkan-Loader --------------------------------------------------
 
 def build_vulkan_loader(work_dir: Path, ref: str, jobs: int) -> None:
@@ -271,6 +282,8 @@ def main() -> int:
     parser.add_argument("--repackage-only", action="store_true",
                         help="re-derive MoltenVK_lib.xcframework from the already "
                              "installed MoltenVK.xcframework, without rebuilding")
+    parser.add_argument("--platform", choices=[f.lstrip("-") for f in MOLTENVK_PLATFORMS], default=None,
+                        help="macOS only: build MoltenVK for just this Apple platform, without packaging")
     args = parser.parse_args()
 
     if args.repackage_only:
@@ -285,7 +298,9 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     system = platform.system()
-    if system == "Darwin":
+    if system == "Darwin" and args.platform:
+        build_moltenvk_platform(work_dir, args.ref or MOLTENVK_REF, args.jobs, f"--{args.platform}")
+    elif system == "Darwin":
         build_moltenvk(work_dir, args.ref or MOLTENVK_REF, args.jobs)
     elif system == "Linux":
         build_vulkan_loader(work_dir, args.ref or VULKAN_LOADER_REF, args.jobs)

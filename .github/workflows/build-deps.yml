@@ -54,12 +54,43 @@ jobs:
         with:
           python-version: "3.13"
       - run: brew install ninja
-      - name: wgpu-native
+      # Each library a step per architecture (or slice, or platform), then a
+      # step that finds them all built and makes the xcframeworks.
+      - name: wgpu-native macOS arm64
+        run: python scripts/build_wgpu.py --apple-target aarch64-apple-darwin
+      - name: wgpu-native macOS x86_64
+        run: python scripts/build_wgpu.py --apple-target x86_64-apple-darwin
+      - name: wgpu-native iOS arm64
+        run: python scripts/build_wgpu.py --apple-target aarch64-apple-ios
+      - name: wgpu-native iOS simulator arm64
+        run: python scripts/build_wgpu.py --apple-target aarch64-apple-ios-sim
+      - name: wgpu-native iOS simulator x86_64
+        run: python scripts/build_wgpu.py --apple-target x86_64-apple-ios
+      - name: wgpu-native xcframeworks
         run: python scripts/build_wgpu.py
-      - name: shaderc and spirv-cross
+      - name: shaderc + spirv-cross macOS (arm64 + x86_64)
+        run: python scripts/build_shader_tools.py --apple --slice macos
+      - name: shaderc + spirv-cross iOS arm64
+        run: python scripts/build_shader_tools.py --apple --slice ios
+      - name: shaderc + spirv-cross iOS simulator (arm64 + x86_64)
+        run: python scripts/build_shader_tools.py --apple --slice ios-simulator
+      - name: shaderc + spirv-cross xcframeworks
         run: python scripts/build_shader_tools.py --apple
-      # Every Apple platform MoltenVK builds; the longest step.
-      - name: MoltenVK
+      - name: MoltenVK macOS
+        run: python scripts/build_vulkan.py --platform macos
+      - name: MoltenVK iOS
+        run: python scripts/build_vulkan.py --platform ios
+      - name: MoltenVK iOS simulator
+        run: python scripts/build_vulkan.py --platform iossim
+      - name: MoltenVK tvOS
+        run: python scripts/build_vulkan.py --platform tvos
+      - name: MoltenVK tvOS simulator
+        run: python scripts/build_vulkan.py --platform tvossim
+      - name: MoltenVK visionOS
+        run: python scripts/build_vulkan.py --platform visionos
+      - name: MoltenVK visionOS simulator
+        run: python scripts/build_vulkan.py --platform visionossim
+      - name: MoltenVK xcframeworks
         run: python scripts/build_vulkan.py
       - name: Package
         run: |
@@ -144,23 +175,29 @@ jobs:
           ndk-version: r28c
           add-to-path: false
       - run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
-      - name: wgpu-native
-        run: |
-          rm -rf Dependencies/android
-          python3 scripts/build_wgpu.py --android --abis arm64-v8a,x86_64
-      - name: shaderc and spirv-cross
-        run: python3 scripts/build_shader_tools.py --abis arm64-v8a,x86_64
-      - name: Package
-        run: |
-          for abi in arm64-v8a x86_64; do
-            case "$abi" in arm64-v8a) arch=aarch64 ;; x86_64) arch=x86_64 ;; esac
-            lib="Dependencies/android/$abi/lib"
-            python3 scripts/make_artifactbundle.py --triple "$arch-unknown-linux-android28" \
-              --library "$lib/libwgpu_native.so" \
-              --library "$lib/libshaderc_shared.so" \
-              --library "$lib/libspirv-cross-c-shared.so" \
-              --name "nucleantvulkan-android-$abi" --output dist --version "$VERSION"
-          done
+      - run: rm -rf Dependencies/android
+      - name: wgpu-native arm64-v8a
+        run: python3 scripts/build_wgpu.py --android --abis arm64-v8a
+      - name: wgpu-native x86_64
+        run: python3 scripts/build_wgpu.py --android --abis x86_64
+      - name: shaderc + spirv-cross arm64-v8a
+        run: python3 scripts/build_shader_tools.py --abis arm64-v8a
+      - name: shaderc + spirv-cross x86_64
+        run: python3 scripts/build_shader_tools.py --abis x86_64
+      - name: Package arm64-v8a
+        run: >
+          python3 scripts/make_artifactbundle.py --triple aarch64-unknown-linux-android28
+          --library Dependencies/android/arm64-v8a/lib/libwgpu_native.so
+          --library Dependencies/android/arm64-v8a/lib/libshaderc_shared.so
+          --library Dependencies/android/arm64-v8a/lib/libspirv-cross-c-shared.so
+          --name nucleantvulkan-android-arm64-v8a --output dist --version "$VERSION"
+      - name: Package x86_64
+        run: >
+          python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-android28
+          --library Dependencies/android/x86_64/lib/libwgpu_native.so
+          --library Dependencies/android/x86_64/lib/libshaderc_shared.so
+          --library Dependencies/android/x86_64/lib/libspirv-cross-c-shared.so
+          --name nucleantvulkan-android-x86_64 --output dist --version "$VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-android
@@ -181,15 +218,17 @@ jobs:
           fi
           "$setup"
       # Cross-compiled: builds and links the tests, which no device runs here.
-      - name: Build against them
+      - run: mkdir -p Artifacts && cp dist/*.zip Artifacts/
+      - name: Build against them, arm64-v8a
         env:
           ANDROID_BUILD: "1"
-        run: |
-          mkdir -p Artifacts && cp dist/*.zip Artifacts/
-          for abi in arm64-v8a x86_64; do
-            case "$abi" in arm64-v8a) arch=aarch64 ;; x86_64) arch=x86_64 ;; esac
-            SWIFT_ANDROID_ABI="$abi" swift build --swift-sdk "$arch-unknown-linux-android28" --build-tests
-          done
+          SWIFT_ANDROID_ABI: arm64-v8a
+        run: swift build --swift-sdk aarch64-unknown-linux-android28 --build-tests
+      - name: Build against them, x86_64
+        env:
+          ANDROID_BUILD: "1"
+          SWIFT_ANDROID_ABI: x86_64
+        run: swift build --swift-sdk x86_64-unknown-linux-android28 --build-tests
 
   wasm:
     # build_shader_tools_wasm.py compiles with the clang of the swift.org

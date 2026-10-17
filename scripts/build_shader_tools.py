@@ -340,7 +340,8 @@ def apple_cmake_build(cmake: Path, ninja: Path, src: Path, build_dir: Path, slic
     run([str(cmake), "--build", str(build_dir), "--parallel", str(jobs), "--target", *targets])
 
 
-def build_shaderc_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int) -> None:
+def build_shaderc_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int,
+                        slices: list[str], package: bool) -> None:
     src = work_dir / "shaderc"
     sync_repo(SHADERC_REPO, SHADERC_REF, src)
     sync_script = src / "utils" / "git-sync-deps"
@@ -348,7 +349,7 @@ def build_shaderc_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, j
         run([sys.executable, str(sync_script)], cwd=src)
 
     frameworks = []
-    for slice_name in APPLE_SLICES:
+    for slice_name in slices:
         build_dir = work_dir / "build" / f"shaderc-apple-{slice_name}"
         # Only the combined static library: the tools are executables, which
         # an iOS build would have to sign.
@@ -364,8 +365,9 @@ def build_shaderc_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, j
         archive = _find_one(build_dir, "libshaderc_combined.a")
         frameworks.append(_shaderc_framework(archive, src, stage / "shaderc" / slice_name, slice_name))
 
-    out = DEPENDENCIES_DIR / "macos" / "shaderc.xcframework"
-    _create_xcframework([arg for fw in frameworks for arg in ("-framework", str(fw))], out)
+    if package:
+        out = DEPENDENCIES_DIR / "macos" / "shaderc.xcframework"
+        _create_xcframework([arg for fw in frameworks for arg in ("-framework", str(fw))], out)
 
 
 def _shaderc_framework(archive: Path, src: Path, dest: Path, slice_name: str) -> Path:
@@ -393,7 +395,8 @@ def _shaderc_framework(archive: Path, src: Path, dest: Path, slice_name: str) ->
     return framework
 
 
-def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int) -> None:
+def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Path, jobs: int,
+                            slices: list[str], package: bool) -> None:
     src = work_dir / "SPIRV-Cross"
     sync_repo(SPIRV_CROSS_REPO, SPIRV_CROSS_REF, src)
 
@@ -405,7 +408,7 @@ def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Pat
         shutil.copy2(src / header, headers / header)
 
     arguments = []
-    for slice_name in APPLE_SLICES:
+    for slice_name in slices:
         build_dir = work_dir / "build" / f"spirv-cross-apple-{slice_name}"
         apple_cmake_build(cmake, ninja, src, build_dir, slice_name, [
             "-DSPIRV_CROSS_STATIC=ON",
@@ -422,7 +425,8 @@ def build_spirv_cross_apple(cmake: Path, ninja: Path, work_dir: Path, stage: Pat
         run(["libtool", "-static", "-no_warning_for_no_symbols", "-o", str(merged), *map(str, archives)])
         arguments += ["-library", str(merged), "-headers", str(headers)]
 
-    _create_xcframework(arguments, DEPENDENCIES_DIR / "macos" / "spirv-cross.xcframework")
+    if package:
+        _create_xcframework(arguments, DEPENDENCIES_DIR / "macos" / "spirv-cross.xcframework")
 
 
 def _create_xcframework(arguments: list[str], out: Path) -> None:
@@ -439,10 +443,14 @@ def main_apple(args) -> int:
     ninja = Path(shutil.which("ninja"))
     work_dir: Path = args.work_dir.resolve()
     stage = work_dir / "stage-apple"
+    # --slice: that slice only, without packaging, so a build can go one slice
+    # at a time; the run without it finds each one built and packages them.
+    slices = [args.slice] if args.slice else list(APPLE_SLICES)
+    package = args.slice is None
     if args.only in (None, "shaderc"):
-        build_shaderc_apple(cmake, ninja, work_dir, stage, args.jobs)
+        build_shaderc_apple(cmake, ninja, work_dir, stage, args.jobs, slices, package)
     if args.only in (None, "spirv-cross"):
-        build_spirv_cross_apple(cmake, ninja, work_dir, stage, args.jobs)
+        build_spirv_cross_apple(cmake, ninja, work_dir, stage, args.jobs, slices, package)
     log("done")
     return 0
 
@@ -509,6 +517,8 @@ def main() -> int:
                         help="wipe the work directory before building")
     parser.add_argument("--apple", action="store_true",
                         help="build the Apple xcframeworks (Dependencies/macos) instead of Android")
+    parser.add_argument("--slice", choices=list(APPLE_SLICES), default=None,
+                        help="with --apple: build just this slice, without packaging")
     args = parser.parse_args()
 
     if args.apple:

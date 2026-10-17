@@ -526,6 +526,17 @@ def build_apple(work_dir: Path, ref: str) -> None:
         macos_dir / "wgpu_native_framework.xcframework")
 
 
+def build_apple_target(work_dir: Path, ref: str, target: str) -> None:
+    """One Apple triple only, without packaging — so a build can go one
+    architecture at a time; the plain run after finds each one built."""
+    if target not in ALL_TARGETS:
+        sys.exit(f"error: unknown Apple target {target}; choices: {', '.join(ALL_TARGETS)}")
+    src = work_dir / "wgpu-native"
+    sync_repo(WGPU_REPO, ref, src)
+    ensure_targets(src)
+    cargo_build(src, target, _env_for(target))
+
+
 # --- Entry point -----------------------------------------------------------
 
 def main() -> int:
@@ -549,6 +560,9 @@ def main() -> int:
                              "ANDROID_SDK_ROOT/ndk)")
     parser.add_argument("--api", type=int, default=ANDROID_API_DEFAULT,
                         help=f"Android only: API level (default: {ANDROID_API_DEFAULT})")
+    parser.add_argument("--apple-target", default=None,
+                        help="macOS only: build just this Rust triple, without packaging "
+                             f"(choices: {', '.join(ALL_TARGETS)})")
     args = parser.parse_args()
 
     work_dir: Path = args.work_dir.resolve()
@@ -568,7 +582,9 @@ def main() -> int:
         return 0
 
     system = platform.system()
-    if system == "Darwin":
+    if system == "Darwin" and args.apple_target:
+        build_apple_target(work_dir, args.ref, args.apple_target)
+    elif system == "Darwin":
         build_apple(work_dir, args.ref)
     elif system == "Linux":
         build_linux(work_dir, args.ref, args.prefix.resolve())
