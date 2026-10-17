@@ -7,10 +7,11 @@
 #   3. release   makes the release commit on top of the commit it ran on, and
 #                tags it with the version:
 #                  * Package.swift's `releasedVulkan` filled in: each
-#                    archive's URL on this release and its checksum (SHA-256,
-#                    what `swift package compute-checksum` gives), which make
-#                    them binary targets that SwiftPM downloads only for the
-#                    platform and architecture being built;
+#                    archive's URL on this release and its checksum (from
+#                    `swift package compute-checksum`, which a url binary
+#                    target must carry), which make them binary targets
+#                    that SwiftPM downloads only for the platform and
+#                    architecture being built;
 #                  * SulphurGeometry by version (`from:`) instead of its main
 #                    branch: a package depended on by version may only depend
 #                    on versions itself;
@@ -103,12 +104,17 @@ jobs:
       - name: Release commit
         run: |
           python3 - <<'EOF'
-          import hashlib, os, pathlib
+          import os, pathlib, subprocess
+
+          def checksum(path):
+              return subprocess.run(["swift", "package", "compute-checksum", str(path)],
+                                    check=True, capture_output=True, text=True).stdout.strip()
+
           base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{os.environ['TAG']}"
           entries = "".join(
               f'    "{path.name}": (\n'
               f'        url: "{base}/{path.name}",\n'
-              f'        checksum: "{hashlib.sha256(path.read_bytes()).hexdigest()}"\n'
+              f'        checksum: "{checksum(path)}"\n'
               f'    ),\n'
               for path in sorted(pathlib.Path("dist").glob("*.zip"))
           )
