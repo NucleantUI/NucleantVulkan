@@ -200,7 +200,10 @@ def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     run(["./fetchDependencies", *MOLTENVK_PLATFORMS.keys()], cwd=src)
 
     # Build every platform slice; MoltenVK assembles the xcframework for us.
-    run(["make", *MOLTENVK_PLATFORMS.values(), f"-j{jobs}"], cwd=src)
+    # One platform after another, not make -j: each target is an xcodebuild
+    # of the same project, and parallel ones lock each other's build database
+    # ("database is locked"). xcodebuild compiles in parallel by itself.
+    run(["make", *MOLTENVK_PLATFORMS.values()], cwd=src)
 
     # Prefer the dynamic framework variant (matches the bundled layout: a
     # MoltenVK.framework holding a dylib). Fall back to whatever was emitted.
@@ -227,7 +230,7 @@ def build_moltenvk_platform(work_dir: Path, ref: str, jobs: int, platform_flag: 
     src = work_dir / "MoltenVK"
     sync_repo(MOLTENVK_REPO, ref, src)
     run(["./fetchDependencies", platform_flag], cwd=src)
-    run(["make", MOLTENVK_PLATFORMS[platform_flag], f"-j{jobs}"], cwd=src)
+    run(["make", MOLTENVK_PLATFORMS[platform_flag]], cwd=src)
 
 
 # --- Linux: Vulkan-Loader --------------------------------------------------
