@@ -234,16 +234,17 @@ def install_moltenvk(src: Path) -> None:
 #   --platform <platform>       make for it
 #
 # All the --dependencies first: fetchDependencies ends with `make clean` of
-# MoltenVK, which would drop the platforms already made. KEEP_CACHE=Y keeps
+# MoltenVK, which would drop the platforms already made. --keep-cache keeps
 # its own intermediates, where the platforms built before stay staged, so its
 # libraries' xcframeworks grow by one platform each run; each make then adds
-# its platform to MoltenVK.xcframework the same way.
+# its platform to MoltenVK.xcframework the same way. (The flag, not
+# KEEP_CACHE in the environment: fetchDependencies resets that variable.)
 
 def build_moltenvk_dependencies(work_dir: Path, ref: str, platform_flag: str) -> None:
     require("xcodebuild")
     src = work_dir / "MoltenVK"
     sync_repo(MOLTENVK_REPO, ref, src)
-    run(["./fetchDependencies", platform_flag], cwd=src, env={**os.environ, "KEEP_CACHE": "Y"})
+    run(["./fetchDependencies", "--keep-cache", platform_flag], cwd=src)
 
 
 def build_moltenvk_platform(work_dir: Path, platform_flag: str) -> None:
