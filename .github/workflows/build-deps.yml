@@ -16,8 +16,8 @@
 # apt, as before.
 #
 # The archives are this run's artifacts ("vulkan-*"). Run it by hand to check
-# that the dependencies still build; a release workflow will run it for each
-# tag and attach the archives to the release.
+# that the dependencies still build; release.yml runs it for each release
+# and attaches the archives to it.
 
 name: build-deps
 
