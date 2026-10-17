@@ -109,23 +109,28 @@ let PIP_MODE = ProcessInfo.processInfo.environment["PIP_MODE"] == "1"
 // fallback.
 let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_ANDROID_USE_AHARDWAREBUFFER"] == "1"
 
-/// Each prebuilt archive on this release's GitHub release, by file name: its
-/// URL and checksum. Written here by the release workflow on the release
-/// commit — in this file, not one it reads, because SwiftPM caches a
-/// manifest's evaluation by its text (and environment), not by the files it
-/// looks at. Empty on master.
+/// Each prebuilt archive on the latest GitHub release, by file name: its URL
+/// and checksum. Written here by .github/workflows/release.yml, which commits
+/// it to master with the release — so master and the release's tag both
+/// build from exactly the archives on that release. In this file, not one it
+/// reads, because SwiftPM caches a manifest's evaluation by its text (and
+/// environment), not by the files it looks at. Empty only before the first
+/// release.
 let releasedVulkan: [String: (url: String, checksum: String)] = [:]
 
-/// The libraries come prebuilt: from the release (above), or, with
-/// NUCLEANT_VULKAN_ARTIFACTS=1, from Artifacts/ — the archives
-/// .github/workflows/build-deps.yml builds, put there to build and test
-/// against. Otherwise they come from the vendored Dependencies/.
-let prebuiltVulkan = !releasedVulkan.isEmpty
-    || ProcessInfo.processInfo.environment["NUCLEANT_VULKAN_ARTIFACTS"] == "1"
+/// With NUCLEANT_VULKAN_ARTIFACTS=1, the archives in Artifacts/ — the ones
+/// .github/workflows/build-deps.yml has just built, put there to build and
+/// test against. They come before the release's, which they are about to
+/// replace.
+let localArtifacts = ProcessInfo.processInfo.environment["NUCLEANT_VULKAN_ARTIFACTS"] == "1"
 
-/// A prebuilt archive as a binary target: the release's URL, else Artifacts/.
+/// The libraries come prebuilt: from Artifacts/ (above), or from the release.
+/// Otherwise — before the first release — from the vendored Dependencies/.
+let prebuiltVulkan = localArtifacts || !releasedVulkan.isEmpty
+
+/// A prebuilt archive as a binary target: Artifacts/, else the release's URL.
 func prebuiltBinary(_ name: String, _ archive: String) -> Target {
-    if let release = releasedVulkan[archive] {
+    if !localArtifacts, let release = releasedVulkan[archive] {
         return .binaryTarget(name: name, url: release.url, checksum: release.checksum)
     }
     return .binaryTarget(name: name, path: "Artifacts/\(archive)")

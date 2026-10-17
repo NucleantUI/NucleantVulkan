@@ -3,26 +3,28 @@
 #   1. check     the version is X.Y.Z;
 #   2. deps      builds and tests every platform's libraries from source
 #                (build-deps.yml), the archives as artifacts;
-#   3. release   makes the release commit on top of the commit it ran on, and
-#                tags it with the version:
-#                  * Package.swift's `releasedVulkan` filled in: each
-#                    archive's URL on this release and its checksum (from
-#                    `swift package compute-checksum`, which a url binary
-#                    target must carry), which make them binary targets
-#                    that SwiftPM downloads only for the platform and
-#                    architecture being built;
-#                  * no Dependencies/: the vendored libraries stay on master.
-#                Then pushes the tag and publishes the GitHub release with
-#                the archives. A version already released is re-released:
-#                its release and tag are replaced — only now, with everything
-#                built, tested and checked;
+#   3. release   makes the release commit on top of master, the commit it ran
+#                on:
+#                  * Package.swift's `releasedVulkan` filled in (replacing the
+#                    previous release's): each archive's URL on this release
+#                    and its checksum (from `swift package compute-checksum`,
+#                    which a url binary target must carry), which make them
+#                    binary targets that SwiftPM downloads only for the
+#                    platform and architecture being built;
+#                  * no Dependencies/: the libraries are the release's.
+#                Then tags it with the version, publishes the GitHub release
+#                with the archives, and pushes the commit to master — last,
+#                so master never names archives that are not up yet. Master
+#                and the tag then build from the same archives. A version
+#                already released is re-released: its release and tag are
+#                replaced — only now, with everything built, tested and
+#                checked;
 #   4. verify    a new package that depends on the release by its version and
 #                builds and runs against it on Linux, in Swift's image with
 #                nothing installed: the URLs, checksums and manifest as a
 #                consumer gets them, and the libraries an app ships.
 #
-# The release commit is on the tag only, never on master. The tag is pushed
-# with GITHUB_TOKEN, so it starts no workflow.
+# The tag and master are pushed with GITHUB_TOKEN, so they start no workflow.
 
 name: release
 
@@ -48,6 +50,8 @@ jobs:
         run: |
           semver='^[0-9]+\.[0-9]+\.[0-9]+$'
           [[ "$TAG" =~ $semver ]] || { echo "::error::version $TAG is not X.Y.Z"; exit 1; }
+          # The release commit goes onto master.
+          [ "$GITHUB_REF" = refs/heads/master ] || { echo "::error::run it on master, not $GITHUB_REF"; exit 1; }
           if git ls-remote --exit-code --tags "https://github.com/$GITHUB_REPOSITORY" "refs/tags/$TAG" >/dev/null; then
             echo "::notice::$TAG is released already: it will be re-released"
           fi
@@ -95,7 +99,7 @@ jobs:
       - name: Release commit
         run: |
           python3 - <<'EOF'
-          import os, pathlib, subprocess
+          import os, pathlib, re, subprocess
 
           def checksum(path):
               return subprocess.run(["swift", "package", "compute-checksum", str(path)],
@@ -112,9 +116,13 @@ jobs:
           manifest = pathlib.Path("Package.swift")
           text = manifest.read_text()
 
-          empty = "let releasedVulkan: [String: (url: String, checksum: String)] = [:]\n"
-          assert empty in text, "Package.swift has no empty releasedVulkan to fill in"
-          text = text.replace(empty, empty.replace("[:]", "[\n" + entries + "]"))
+          # The previous release's entries, or none before the first.
+          declaration = re.compile(
+              r"let releasedVulkan: \[String: \(url: String, checksum: String\)\] = (\[:\]|\[\n.*?\n\])\n",
+              re.DOTALL)
+          assert len(declaration.findall(text)) == 1, "Package.swift has no releasedVulkan to fill in"
+          text = declaration.sub(
+              lambda _: "let releasedVulkan: [String: (url: String, checksum: String)] = [\n" + entries + "]\n", text)
 
           manifest.write_text(text)
           EOF
@@ -122,7 +130,7 @@ jobs:
           git diff Package.swift
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -r -q Dependencies
+          git rm -r -q --ignore-unmatch Dependencies
           git add Package.swift
           git commit -q -m "Release $TAG: libraries from the release's archives"
       # The manifest as a consumer evaluates it (no sibling NucleantGeometry
@@ -156,6 +164,9 @@ jobs:
           gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
             --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for."
           gh release edit "$TAG" --draft=false
+          # Master builds from this release from now on. Refused if master
+          # moved during the run: run the release again on the new master.
+          git push origin HEAD:refs/heads/master
 
   verify:
     needs: release
