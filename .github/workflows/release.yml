@@ -90,9 +90,14 @@ jobs:
             MoltenVK.xcframework.zip MoltenVK_lib.xcframework.zip \
             wgpu_native.xcframework.zip wgpu_native_framework.xcframework.zip \
             shaderc.xcframework.zip spirv-cross.xcframework.zip \
-            nucleantvulkan-linux-x86_64.artifactbundle.zip nucleantvulkan-linux-aarch64.artifactbundle.zip \
-            nucleantvulkan-android-arm64-v8a.artifactbundle.zip nucleantvulkan-android-x86_64.artifactbundle.zip \
-            nucleantvulkan-wasm32.artifactbundle.zip
+            vulkan-loader-linux-x86_64.artifactbundle.zip vulkan-loader-linux-aarch64.artifactbundle.zip \
+            wgpu_native-linux-x86_64.artifactbundle.zip wgpu_native-linux-aarch64.artifactbundle.zip \
+            shaderc-linux-x86_64.artifactbundle.zip shaderc-linux-aarch64.artifactbundle.zip \
+            spirv-cross-linux-x86_64.artifactbundle.zip spirv-cross-linux-aarch64.artifactbundle.zip \
+            wgpu_native-android-arm64-v8a.artifactbundle.zip wgpu_native-android-x86_64.artifactbundle.zip \
+            shaderc-android-arm64-v8a.artifactbundle.zip shaderc-android-x86_64.artifactbundle.zip \
+            spirv-cross-android-arm64-v8a.artifactbundle.zip spirv-cross-android-x86_64.artifactbundle.zip \
+            shaderc-wasm32.artifactbundle.zip spirv-cross-wasm32.artifactbundle.zip
           do
             [ -f "dist/$archive" ] || { echo "::error::no $archive"; exit 1; }
           done

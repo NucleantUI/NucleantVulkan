@@ -5,14 +5,18 @@
 #
 #   apple    MoltenVK, MoltenVK_lib, wgpu_native, wgpu_native_framework,
 #            shaderc, spirv-cross  (.xcframework.zip each)
-#   linux    nucleantvulkan-linux-<x86_64|aarch64>.artifactbundle.zip   libvulkan.so
-#            (a machine per architecture)                        (the Khronos loader),
-#                                                                libwgpu_native.so,
-#                                                                libshaderc_shared.so,
-#                                                                libspirv-cross-c-shared.so
-#   android  nucleantvulkan-android-<abi>.artifactbundle.zip     libwgpu_native.so,
-#            libshaderc_shared.so, libspirv-cross-c-shared.so
-#   wasm     nucleantvulkan-wasm32.artifactbundle.zip            shaderc, spirv-cross
+#   linux    <library>-linux-<x86_64|aarch64>.artifactbundle.zip, a machine per
+#            architecture:
+#              vulkan-loader   libvulkan.so (the Khronos loader)
+#              wgpu_native     libwgpu_native.so
+#              shaderc         libshaderc_shared.so
+#              spirv-cross     libspirv-cross-c-shared.so
+#   android  <library>-android-<arm64-v8a|x86_64>.artifactbundle.zip:
+#              wgpu_native, shaderc, spirv-cross (shared, as on Linux)
+#   wasm     <library>-wasm32.artifactbundle.zip:
+#              shaderc (libshaderc_combined.a), spirv-cross (libspirv-cross.a)
+#
+# One archive per library, named after it, as the xcframeworks are.
 #
 # Apple: macOS and iOS (iPadOS) only, for now.
 #
@@ -173,10 +177,12 @@ jobs:
           for so in libvulkan.so libwgpu_native.so libshaderc_shared.so libspirv-cross-c-shared.so; do
             echo "$so: $(patchelf --print-soname $lib/$so 2>/dev/null) needs $(patchelf --print-needed $lib/$so | tr '\n' ' ')"
           done
-          python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu \
-            --library $lib/libvulkan.so --library $lib/libwgpu_native.so \
-            --library $lib/libshaderc_shared.so --library $lib/libspirv-cross-c-shared.so \
-            --name nucleantvulkan-linux-${{ matrix.arch }} --output dist --version "$VERSION"
+          for pair in vulkan-loader:libvulkan.so wgpu_native:libwgpu_native.so \
+                      shaderc:libshaderc_shared.so spirv-cross:libspirv-cross-c-shared.so; do
+            python3 scripts/make_artifactbundle.py --triple ${{ matrix.arch }}-unknown-linux-gnu \
+              --library "$lib/${pair#*:}" \
+              --name "${pair%%:*}-linux-${{ matrix.arch }}" --output dist --version "$VERSION"
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-linux-${{ matrix.arch }}
@@ -236,19 +242,21 @@ jobs:
       - name: shaderc + spirv-cross x86_64
         run: python3 scripts/build_shader_tools.py --abis x86_64
       - name: Package arm64-v8a
-        run: >
-          python3 scripts/make_artifactbundle.py --triple aarch64-unknown-linux-android28
-          --library Dependencies/android/arm64-v8a/lib/libwgpu_native.so
-          --library Dependencies/android/arm64-v8a/lib/libshaderc_shared.so
-          --library Dependencies/android/arm64-v8a/lib/libspirv-cross-c-shared.so
-          --name nucleantvulkan-android-arm64-v8a --output dist --version "$VERSION"
+        run: |
+          for pair in wgpu_native:libwgpu_native.so shaderc:libshaderc_shared.so \
+                      spirv-cross:libspirv-cross-c-shared.so; do
+            python3 scripts/make_artifactbundle.py --triple aarch64-unknown-linux-android28 \
+              --library "Dependencies/android/arm64-v8a/lib/${pair#*:}" \
+              --name "${pair%%:*}-android-arm64-v8a" --output dist --version "$VERSION"
+          done
       - name: Package x86_64
-        run: >
-          python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-android28
-          --library Dependencies/android/x86_64/lib/libwgpu_native.so
-          --library Dependencies/android/x86_64/lib/libshaderc_shared.so
-          --library Dependencies/android/x86_64/lib/libspirv-cross-c-shared.so
-          --name nucleantvulkan-android-x86_64 --output dist --version "$VERSION"
+        run: |
+          for pair in wgpu_native:libwgpu_native.so shaderc:libshaderc_shared.so \
+                      spirv-cross:libspirv-cross-c-shared.so; do
+            python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-android28 \
+              --library "Dependencies/android/x86_64/lib/${pair#*:}" \
+              --name "${pair%%:*}-android-x86_64" --output dist --version "$VERSION"
+          done
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-android
@@ -313,8 +321,10 @@ jobs:
           spirv_cross=$(ls $lib/libspirv-cross-*.a | paste -sd, -)
           python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1 \
             --library "$lib/libshaderc_combined.a" \
+            --name shaderc-wasm32 --output dist --version "$VERSION"
+          python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1 \
             --library "libspirv-cross.a=$spirv_cross" \
-            --name nucleantvulkan-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
+            --name spirv-cross-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-wasm32

@@ -181,26 +181,31 @@ func prebuiltBinary(_ name: String, _ archive: String) -> Target {
     return .binaryTarget(name: name, path: "Artifacts/\(archive)")
 }
 
-/// The vendored libraries of Linux, Android and wasm, as one artifact bundle
-/// per platform and architecture (scripts/make_artifactbundle.py). On Linux
-/// and Android the bundle holds the shared libraries themselves — SwiftPM
-/// copies them next to the product and links them, so libwgpu_native.so stays
-/// the one copy ThorVG's library links too, and an app ships every one of
-/// them: on Linux nothing but the GPU driver comes from the machine.
-func prebuiltLibrariesArchive() -> String {
+/// One library of Linux, Android or wasm as its own artifact bundle
+/// (scripts/make_artifactbundle.py), named after the library, the platform
+/// and the architecture — `wgpu_native-linux-x86_64.artifactbundle.zip` —
+/// the way each library is its own xcframework zip on Apple's platforms. The
+/// binary target has the library's name too. On Linux and Android the bundle
+/// holds the shared library itself — SwiftPM copies it next to the product
+/// and links it, so libwgpu_native.so stays the one copy ThorVG's library
+/// links too, and an app ships every one of them: on Linux nothing but the
+/// GPU driver comes from the machine.
+func prebuiltLibrary(_ library: String) -> Target {
+    let platform: String
     switch platformTarget {
     case .wasi:
-        return "nucleantvulkan-wasm32.artifactbundle.zip"
+        platform = "wasm32"
     case .android:
-        return "nucleantvulkan-android-\(androidABI()).artifactbundle.zip"
+        platform = "android-\(androidABI())"
     default:
         // Linux builds are native, so the host's architecture is the target's.
 #if arch(arm64)
-        return "nucleantvulkan-linux-aarch64.artifactbundle.zip"
+        platform = "linux-aarch64"
 #else
-        return "nucleantvulkan-linux-x86_64.artifactbundle.zip"
+        platform = "linux-x86_64"
 #endif
     }
+    return prebuiltBinary(library, "\(library)-\(platform).artifactbundle.zip")
 }
 
 /// vulkanTargets() over the prebuilt libraries. No unsafeFlags — SwiftPM
@@ -210,15 +215,18 @@ func prebuiltVulkanTargets() -> [Target] {
     switch platformTarget {
     case .linux:
         return [
-            // libvulkan.so (the Khronos loader), libshaderc_shared.so,
-            // libspirv-cross-c-shared.so, libwgpu_native.so — each built from
-            // the same sources as on the other platforms, none of them the
-            // system's.
-            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            // libvulkan.so (the Khronos loader), libwgpu_native.so,
+            // libshaderc_shared.so, libspirv-cross-c-shared.so — each built
+            // from the same sources as on the other platforms, none of them
+            // the system's.
+            prebuiltLibrary("vulkan-loader"),
+            prebuiltLibrary("wgpu_native"),
+            prebuiltLibrary("shaderc"),
+            prebuiltLibrary("spirv-cross"),
             // Vulkan-Headers 1.4.334, as Apple's CVulkan, with every WSI.
             .target(
                 name: "CVulkan",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["vulkan-loader"],
                 path: "Sources/CVulkanLinuxPrebuilt",
                 sources: ["stub.c"],
                 publicHeadersPath: "include"
@@ -227,7 +235,7 @@ func prebuiltVulkanTargets() -> [Target] {
             // the same refs.
             .target(
                 name: "CShaderc",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["shaderc"],
                 path: "Sources/CShadercAndroid",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -237,7 +245,7 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             .target(
                 name: "CSPIRVCross",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["spirv-cross"],
                 path: "Sources/CSPIRVCrossAndroid",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -247,7 +255,7 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             .target(
                 name: "CWgpu",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["wgpu_native"],
                 path: "Sources/CWgpuLinux",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -262,12 +270,14 @@ func prebuiltVulkanTargets() -> [Target] {
                 name: "CVulkan",
                 path: "Sources/CVulkanAndroid"
             ),
-            // libshaderc_shared.so, libspirv-cross-c-shared.so,
-            // libwgpu_native.so — staged into the app as before.
-            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            // libwgpu_native.so, libshaderc_shared.so,
+            // libspirv-cross-c-shared.so — staged into the app as before.
+            prebuiltLibrary("wgpu_native"),
+            prebuiltLibrary("shaderc"),
+            prebuiltLibrary("spirv-cross"),
             .target(
                 name: "CShaderc",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["shaderc"],
                 path: "Sources/CShadercAndroid",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -277,7 +287,7 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             .target(
                 name: "CSPIRVCross",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["spirv-cross"],
                 path: "Sources/CSPIRVCrossAndroid",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -287,7 +297,7 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             .target(
                 name: "CWgpu",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["wgpu_native"],
                 path: "Sources/CWgpuLinux",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -313,10 +323,11 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             // libshaderc_combined.a, libspirv-cross.a (static: the browser
             // has no loader).
-            prebuiltBinary("VulkanLibraries", prebuiltLibrariesArchive()),
+            prebuiltLibrary("shaderc"),
+            prebuiltLibrary("spirv-cross"),
             .target(
                 name: "CShaderc",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["shaderc"],
                 path: "Sources/CShadercWasm",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",
@@ -329,7 +340,7 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             .target(
                 name: "CSPIRVCross",
-                dependencies: ["VulkanLibraries"],
+                dependencies: ["spirv-cross"],
                 path: "Sources/CSPIRVCrossWasm",
                 sources: ["stub.c"],
                 publicHeadersPath: "include",

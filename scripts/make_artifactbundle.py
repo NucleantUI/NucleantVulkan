@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Package one platform's prebuilt libraries as a SwiftPM artifact bundle:
+"""Package one of a platform's prebuilt libraries as a SwiftPM artifact
+bundle, named after the library, the platform and the architecture:
 
-    <output>/<name>.artifactbundle.zip
-        Libraries.artifactbundle/
-            info.json            one "staticLibrary" artifact per library
-            lib/lib<name>.so|.a  each library
+    <output>/<name>.artifactbundle.zip      e.g. wgpu_native-linux-x86_64
+        <name>.artifactbundle/
+            info.json            one "staticLibrary" artifact
+            lib/lib<lib>.so|.a   the library
 
 for a `.binaryTarget(..., url:/path:)` on Linux, Android and WebAssembly, the
-way the xcframeworks are on Apple's platforms. One bundle per platform and
-architecture, so a package downloads only what it builds with.
+way each library is its own xcframework zip on Apple's platforms. One bundle
+per library, platform and architecture, so a package downloads only what it
+builds with, and each archive says what it holds.
 
 Shared libraries stay shared. SwiftPM takes a bundle's library as it is: it
 copies the file next to the product it builds and links it with -l<name>, so
@@ -23,11 +25,11 @@ since an artifact is one file.
 
     python3 scripts/make_artifactbundle.py --triple x86_64-unknown-linux-gnu \\
         --library Dependencies/linux/lib/libwgpu_native.so \\
-        --name nucleantvulkan-linux-x86_64 --output dist
+        --name wgpu_native-linux-x86_64 --output dist
 
---library is repeatable; `--library libspirv-cross.a=a.a,b.a` names a merged
-archive. --ar (an MRI-capable archiver: llvm-ar, GNU ar) does the merging.
-The C targets carry their own headers, so the bundle has none.
+`--library libspirv-cross.a=a.a,b.a` names a merged archive; --ar (an
+MRI-capable archiver: llvm-ar, GNU ar) does the merging. The C targets carry
+their own headers, so the bundle has none.
 """
 
 from __future__ import annotations
@@ -64,7 +66,7 @@ def main() -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as temp:
-        bundle = Path(temp) / "Libraries.artifactbundle"
+        bundle = Path(temp) / f"{args.name}.artifactbundle"
         lib_dir = bundle / "lib"
         lib_dir.mkdir(parents=True)
         artifacts = {}
