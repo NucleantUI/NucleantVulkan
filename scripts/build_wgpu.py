@@ -43,6 +43,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # --- Paths -----------------------------------------------------------------
@@ -97,6 +98,22 @@ def run(cmd: list[str], cwd: Path | None = None, env: dict | None = None) -> Non
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
+def fetch_crates(src: Path, env: dict) -> None:
+    """Download wgpu-native's crates before building, retrying: cargo's own
+    few retries all come within seconds, so a short blip reaching crates.io
+    would fail the whole build. With the crates downloaded, the build after
+    needs no network."""
+    env = dict(env, CARGO_NET_RETRY="10")
+    for attempt in range(1, 4):
+        log(f"$ cargo fetch   (cwd={src}, attempt {attempt}/3)")
+        if subprocess.run(["cargo", "fetch"], cwd=src, env=env).returncode == 0:
+            return
+        if attempt < 3:
+            log(f"cargo fetch failed; trying again in {60 * attempt}s")
+            time.sleep(60 * attempt)
+    sys.exit("error: could not download wgpu-native's crates")
+
+
 def require(tool: str) -> None:
     if shutil.which(tool) is None:
         sys.exit(f"error: required tool '{tool}' not found on PATH")
@@ -140,6 +157,7 @@ def cargo_build(src: Path, target: str, deployment_env: tuple[str, str]) -> Path
     env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
     key, value = deployment_env
     env[key] = value
+    fetch_crates(src, env)
     run(["cargo", "build", "--release", "--target", target], cwd=src, env=env)
     dylib = src / "target" / target / "release" / DYLIB
     if not dylib.is_file():
@@ -269,6 +287,7 @@ def cargo_build_host(src: Path) -> Path:
     env = dict(os.environ)
     cargo_bin = Path.home() / ".cargo" / "bin"
     env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
+    fetch_crates(src, env)
     run(["cargo", "build", "--release"], cwd=src, env=env)
     so = src / "target" / "release" / LINUX_SO
     if not so.is_file():
@@ -442,6 +461,7 @@ def cargo_build_android(src: Path, abi: str, ndk: Path, api: int) -> Path:
         f"{rustflags} -Clink-arg=-Wl,-soname,{ANDROID_SO}".strip()
     )
 
+    fetch_crates(src, env)
     run(["cargo", "build", "--release", "--target", triple], cwd=src, env=env)
     so = src / "target" / triple / "release" / ANDROID_SO
     if not so.is_file():
