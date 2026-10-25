@@ -94,6 +94,8 @@ jobs:
             wgpu_native-linux-x86_64.artifactbundle.zip wgpu_native-linux-aarch64.artifactbundle.zip \
             shaderc-linux-x86_64.artifactbundle.zip shaderc-linux-aarch64.artifactbundle.zip \
             spirv-cross-linux-x86_64.artifactbundle.zip spirv-cross-linux-aarch64.artifactbundle.zip \
+            vulkan-loader-windows-x86_64.artifactbundle.zip wgpu_native-windows-x86_64.artifactbundle.zip \
+            shaderc-windows-x86_64.artifactbundle.zip spirv-cross-windows-x86_64.artifactbundle.zip \
             wgpu_native-android-arm64-v8a.artifactbundle.zip wgpu_native-android-x86_64.artifactbundle.zip \
             shaderc-android-arm64-v8a.artifactbundle.zip shaderc-android-x86_64.artifactbundle.zip \
             spirv-cross-android-arm64-v8a.artifactbundle.zip spirv-cross-android-x86_64.artifactbundle.zip \
@@ -145,7 +147,8 @@ jobs:
       - name: Release manifest
         run: |
           # As Linux, each Android ABI and wasm evaluate it (Apple's can only
-          # be evaluated on a Mac; its archive names are fixed).
+          # be evaluated on a Mac, Windows' on Windows; their archive names
+          # are fixed).
           swift package dump-package > linux.json
           ANDROID_BUILD=1 SWIFT_ANDROID_ABI=arm64-v8a swift package dump-package > android-arm64-v8a.json
           ANDROID_BUILD=1 SWIFT_ANDROID_ABI=x86_64 swift package dump-package > android-x86_64.json

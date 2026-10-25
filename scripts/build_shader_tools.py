@@ -2,7 +2,8 @@
 """Cross-compile shaderc and spirv-cross for Android — or, with --apple, build
 the Apple xcframeworks under Dependencies/macos (see "Apple" below), or, with
 --linux, the shared libraries for the release's Linux artifact bundle (see
-"Linux" below).
+"Linux" below), or, with --windows, the DLLs for the Windows one (see
+"Windows" below).
 
 These two have no Android story anywhere else in the package: on Linux they are
 apt packages resolved through pkg-config (CShadercLinux / CSPIRVCrossLinux), and
@@ -261,8 +262,9 @@ def build_spirv_cross(cmake: Path, ninja: Path, work_dir: Path, ndk: Path, abi: 
     _install_lib(lib, abi)
     # Beside shim.h, which includes it unprefixed — matching the Linux shim's
     # spelling. Vendored into the target for the same publicHeadersPath reason
-    # as shaderc above.
+    # as shaderc above. spirv.h too: spirv_cross_c.h includes it.
     _install_header(src / "spirv_cross_c.h", SPIRV_CROSS_TARGET_INCLUDE)
+    _install_header(src / "spirv.h", SPIRV_CROSS_TARGET_INCLUDE)
 
 
 # --- Apple -----------------------------------------------------------------
@@ -543,6 +545,107 @@ def main_linux(args) -> int:
     return 0
 
 
+# --- Windows ---------------------------------------------------------------
+#
+# Shared, as on Linux, for the release's Windows artifact bundle — each a DLL
+# with its import library, of the same refs as every other platform:
+#
+#   Dependencies/windows/bin/shaderc_shared.dll         (glslang and
+#   Dependencies/windows/lib/shaderc_shared.lib          SPIRV-Tools inside)
+#   Dependencies/windows/bin/spirv-cross-c-shared.dll
+#   Dependencies/windows/lib/spirv-cross-c-shared.lib
+#
+# With the DLL C runtime (/MD), as Swift on Windows has. The headers are the
+# Android targets', as Linux's are.
+#
+# Native on Windows with CMake's Visual Studio generator, which finds MSVC by
+# itself; elsewhere Ninja, with whatever toolchain CMAKE_TOOLCHAIN_FILE names
+# (scripts/windows-cross/toolchain.cmake in that image).
+
+# --windows-arch -> the Visual Studio generator's platform.
+WINDOWS_PLATFORMS = {"x86_64": "x64", "arm64": "ARM64"}
+
+
+def default_windows_arch() -> str:
+    """The host's architecture on Windows (the build is native there); x86_64
+    for a cross-compile."""
+    if platform.system() == "Windows" and platform.machine().upper() == "ARM64":
+        return "arm64"
+    return "x86_64"
+
+
+def windows_cmake_build(cmake: Path, src: Path, build_dir: Path, arch: str,
+                        extra: list[str], targets: list[str], jobs: int) -> None:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        str(cmake), "-S", str(src), "-B", str(build_dir),
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW",
+        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL",
+    ]
+    if platform.system() == "Windows":
+        command += ["-A", WINDOWS_PLATFORMS[arch]]
+    else:
+        require("ninja")
+        command += ["-G", "Ninja"]
+    run(command + extra)
+    run([str(cmake), "--build", str(build_dir), "--config", "Release",
+         "--parallel", str(jobs), "--target", *targets])
+
+
+def install_windows_dll(build_dir: Path, name: str, dest: Path) -> None:
+    """<name>.dll and its import library <name>.lib from build_dir (wherever
+    the generator put them) into dest/bin and dest/lib."""
+    for sub, file in (("bin", f"{name}.dll"), ("lib", f"{name}.lib")):
+        (dest / sub).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_find_one(build_dir, file), dest / sub / file)
+        log(f"installed -> {dest / sub / file}")
+
+
+def main_windows(args) -> int:
+    for tool in ("cmake", "git"):
+        require(tool)
+    cmake = Path(shutil.which("cmake"))
+    work_dir: Path = args.work_dir.resolve()
+    arch = args.windows_arch or default_windows_arch()
+    dest = DEPENDENCIES_DIR / "windows"
+
+    if args.only in (None, "shaderc"):
+        src = work_dir / "shaderc"
+        sync_repo(SHADERC_REPO, SHADERC_REF, src)
+        sync_script = src / "utils" / "git-sync-deps"
+        if sync_script.is_file() and not (src / "third_party" / "glslang").is_dir():
+            run([sys.executable, str(sync_script)], cwd=src)
+        build_dir = work_dir / "build" / f"shaderc-windows-{arch}"
+        windows_cmake_build(cmake, src, build_dir, arch, [
+            "-DSHADERC_SKIP_TESTS=ON",
+            "-DSHADERC_SKIP_EXAMPLES=ON",
+            "-DSHADERC_SKIP_COPYRIGHT_CHECK=ON",
+            "-DSPIRV_SKIP_EXECUTABLES=ON",
+            "-DSPIRV_SKIP_TESTS=ON",
+            "-DENABLE_GLSLANG_BINARIES=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
+            # shaderc otherwise swaps MSVC's /MD for /MT.
+            "-DSHADERC_ENABLE_SHARED_CRT=ON",
+        ], ["shaderc_shared"], args.jobs)
+        install_windows_dll(build_dir, "shaderc_shared", dest)
+
+    if args.only in (None, "spirv-cross"):
+        src = work_dir / "SPIRV-Cross"
+        sync_repo(SPIRV_CROSS_REPO, SPIRV_CROSS_REF, src)
+        build_dir = work_dir / "build" / f"spirv-cross-windows-{arch}"
+        windows_cmake_build(cmake, src, build_dir, arch, [
+            "-DSPIRV_CROSS_SHARED=ON",
+            "-DSPIRV_CROSS_STATIC=OFF",
+            "-DSPIRV_CROSS_CLI=OFF",
+            "-DSPIRV_CROSS_ENABLE_TESTS=OFF",
+        ], ["spirv-cross-c-shared"], args.jobs)
+        install_windows_dll(build_dir, "spirv-cross-c-shared", dest)
+
+    log("done")
+    return 0
+
+
 # --- install helpers -------------------------------------------------------
 
 
@@ -609,7 +712,17 @@ def main() -> int:
                         help="with --apple: build just this slice, without packaging")
     parser.add_argument("--linux", action="store_true",
                         help="build the Linux shared libraries (Dependencies/linux/lib) instead of Android")
+    parser.add_argument("--windows", action="store_true",
+                        help="build the Windows DLLs (Dependencies/windows) instead of Android; "
+                             "the default on a Windows host")
+    parser.add_argument("--windows-arch", choices=list(WINDOWS_PLATFORMS), default=None,
+                        help="with --windows: architecture (default: the host's on Windows, else x86_64)")
     args = parser.parse_args()
+
+    if args.windows or platform.system() == "Windows":
+        if args.clean and args.work_dir.exists():
+            shutil.rmtree(args.work_dir)
+        return main_windows(args)
 
     if args.linux:
         if args.clean and args.work_dir.exists():

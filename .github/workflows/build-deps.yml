@@ -11,6 +11,12 @@
 #              wgpu_native     libwgpu_native.so
 #              shaderc         libshaderc_shared.so
 #              spirv-cross     libspirv-cross-c-shared.so
+#   windows  <library>-windows-x86_64.artifactbundle.zip, each the DLL with
+#            its import library:
+#              vulkan-loader   vulkan-1.dll (the Khronos loader)
+#              wgpu_native     wgpu_native.dll
+#              shaderc         shaderc_shared.dll
+#              spirv-cross     spirv-cross-c-shared.dll
 #   android  <library>-android-<arm64-v8a|x86_64>.artifactbundle.zip:
 #              wgpu_native, shaderc, spirv-cross (shared, as on Linux)
 #   wasm     <library>-wasm32.artifactbundle.zip:
@@ -23,7 +29,8 @@
 # Linux and Android keep their libraries shared inside the bundles (see
 # scripts/make_artifactbundle.py). On Linux the bundle is everything an app
 # needs but the GPU driver: no system Vulkan, shaderc or spirv-cross, and the
-# Vulkan headers are vendored.
+# Vulkan headers are vendored. Windows is the same, as DLLs: SwiftPM links each
+# import library and copies the DLL next to the product.
 #
 # The archives are this run's artifacts ("vulkan-*"). Run it by hand to check
 # that the dependencies still build; release.yml runs it for each release
@@ -37,7 +44,7 @@ on:
       platform:
         description: Platform to build (all, or one to retry)
         type: choice
-        options: [all, apple, linux, android, wasm]
+        options: [all, apple, linux, windows, android, wasm]
         default: all
   workflow_call:
     inputs:
@@ -208,6 +215,82 @@ jobs:
           name: vulkan-linux-${{ matrix.arch }}
           path: Artifacts
       - name: Test against it, ${{ matrix.arch }}
+        run: swift test
+
+  windows:
+    name: windows (x86_64)
+    # Native, with MSVC: CMake's Visual Studio generator and cargo's MSVC
+    # target find the compiler themselves. x86_64 only, for now.
+    if: inputs.platform == '' || inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-2025
+    timeout-minutes: 360
+    env:
+      # bindgen (wgpu-native's build script) loads libclang from the image's
+      # LLVM.
+      LIBCLANG_PATH: C:\Program Files\LLVM\bin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # The sources and builds in a short path: MSBuild's intermediate
+      # directories under shaderc's third_party run past MAX_PATH from the
+      # workspace.
+      - name: wgpu-native x86_64
+        run: python scripts/build_wgpu.py --work-dir C:\w
+      - name: Vulkan loader x86_64
+        run: python scripts/build_vulkan.py --work-dir C:\w
+      - name: shaderc + spirv-cross x86_64
+        run: python scripts/build_shader_tools.py --work-dir C:\w
+      - name: Package x86_64
+        run: |
+          $lib = "Dependencies/windows"
+          foreach ($pair in "vulkan-loader:vulkan-1", "wgpu_native:wgpu_native",
+                            "shaderc:shaderc_shared", "spirv-cross:spirv-cross-c-shared") {
+            $name, $file = $pair -split ":"
+            python scripts/make_artifactbundle.py --triple x86_64-unknown-windows-msvc `
+              --library "$lib/lib/$file.lib" --dll "$lib/bin/$file.dll" `
+              --name "$name-windows-x86_64" --output dist --version "$env:VERSION"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vulkan-windows-x86_64
+          path: dist/*.zip
+
+  windows-test:
+    name: windows test (x86_64)
+    needs: windows
+    # A fresh machine with nothing but Swift: the bundles alone have to build
+    # and run the tests, as on Linux. It has no GPU, so Mesa's software Vulkan
+    # driver (lavapipe) is the one the loader finds — for the engine test on a
+    # Win32 window (Tests/NucleantVulkanTests/Win32EngineTests.swift).
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: vulkan-windows-x86_64
+          path: Artifacts
+      - uses: compnerd/gha-setup-swift@v0.5.1
+        with:
+          swift-version: swift-${{ env.SWIFT_VERSION }}-release
+          swift-build: ${{ env.SWIFT_VERSION }}-RELEASE
+      - name: lavapipe
+        run: |
+          $version = "26.2.4"
+          curl.exe -fsSL -o mesa.7z "https://github.com/pal1000/mesa-dist-win/releases/download/$version/mesa3d-$version-release-msvc.7z"
+          7z x mesa.7z -omesa x64/vulkan_lvp.dll x64/lvp_icd.x86_64.json -r | Out-Null
+          $icd = (Resolve-Path mesa/x64/lvp_icd.x86_64.json).Path
+          Get-Content $icd
+          # Registered the way an installed driver is: the loader ignores
+          # VK_DRIVER_FILES in an elevated process, which the runner's are.
+          $drivers = "HKLM:\SOFTWARE\Khronos\Vulkan\Drivers"
+          New-Item -Path $drivers -Force | Out-Null
+          New-ItemProperty -Path $drivers -Name $icd -PropertyType DWord -Value 0 -Force | Out-Null
+      - name: Test against them, x86_64
         run: swift test
 
   android:

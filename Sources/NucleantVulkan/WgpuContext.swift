@@ -78,6 +78,13 @@ public final class WgpuContext: @unchecked Sendable {
         /// see the `ANDROID_USE_AHARDWAREBUFFER` flag in Package.swift.
         /// Ownership of the reference passes to the importer.
         fileprivate let hardwareBuffer: UnsafeMutableRawPointer?
+        #elseif os(Windows)
+        /// NT handle for this target's backing memory
+        /// (`VK_KHR_external_memory_win32`) — Windows' counterpart of the fd
+        /// below, minted with the texture for the same reason. Unlike an fd,
+        /// importing it does not consume it: whoever imports it closes it
+        /// afterwards (`CloseHandle`). nil if export failed.
+        fileprivate let exportedHandle: UnsafeMutableRawPointer?
         #elseif !(os(macOS) || os(iOS))
         /// POSIX fd for this target's backing memory
         /// (`VK_KHR_external_memory_fd`), minted alongside the texture itself
@@ -97,7 +104,8 @@ public final class WgpuContext: @unchecked Sendable {
             height: Int,
             storageCapable: Bool,
             exportedFd: Int32? = nil,
-            hardwareBuffer: UnsafeMutableRawPointer? = nil
+            hardwareBuffer: UnsafeMutableRawPointer? = nil,
+            exportedHandle: UnsafeMutableRawPointer? = nil
         ) {
             self.context        = context
             self.texture        = texture
@@ -107,6 +115,8 @@ public final class WgpuContext: @unchecked Sendable {
             self.storageCapable = storageCapable
             #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
             self.hardwareBuffer = hardwareBuffer
+            #elseif os(Windows)
+            self.exportedHandle = exportedHandle
             #elseif !(os(macOS) || os(iOS))
             self.exportedFd     = exportedFd
             #endif
@@ -125,6 +135,15 @@ public final class WgpuContext: @unchecked Sendable {
         /// device lacks the extension or the export failed at creation time.
         public func nativeAndroidHardwareBuffer() -> UnsafeMutableRawPointer? {
             hardwareBuffer
+        }
+        #elseif os(Windows)
+        /// The NT handle for this target's backing memory, for importing as a
+        /// VkImage via `VkImportMemoryWin32HandleInfoKHR`
+        /// (`VK_KHR_external_memory_win32`) — the same GPU-to-GPU sharing as
+        /// the fd elsewhere. `nil` if the driver lacks the extension or export
+        /// failed at creation time.
+        public func nativeVulkanExportedWin32Handle() -> UnsafeMutableRawPointer? {
+            exportedHandle
         }
         #else
         /// The POSIX fd for this target's backing memory, for importing as a
@@ -331,6 +350,25 @@ public final class WgpuContext: @unchecked Sendable {
             height:         height,
             storageCapable: false,
             hardwareBuffer: hardwareBuffer
+        )
+        #elseif os(Windows)
+        // No StorageBinding here, same as the fd branch below: the export
+        // path maps the same plain render-target usages.
+        var exportedHandle: UnsafeMutableRawPointer? = nil
+        guard let texture = wgpuDeviceCreateTextureWithExportedWin32Handle(
+            device, &descriptor, &exportedHandle
+        ) else {
+            print("WgpuContext: wgpuDeviceCreateTextureWithExportedWin32Handle failed "
+                  + "— driver may lack VK_KHR_external_memory_win32")
+            return nil
+        }
+        return Target(
+            context:        self,
+            texture:        texture,
+            width:          width,
+            height:         height,
+            storageCapable: false,
+            exportedHandle: exportedHandle
         )
         #else
         // No StorageBinding here (see the field above the Apple-only branch):

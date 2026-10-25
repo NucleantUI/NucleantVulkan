@@ -7,7 +7,8 @@ bundle, named after the library, the platform and the architecture:
             info.json            one "staticLibrary" artifact
             lib/lib<lib>.so|.a   the library
 
-for a `.binaryTarget(..., url:/path:)` on Linux, Android and WebAssembly, the
+for a `.binaryTarget(..., url:/path:)` on Linux, Windows, Android and
+WebAssembly, the
 way each library is its own xcframework zip on Apple's platforms. One bundle
 per library, platform and architecture, so a package downloads only what it
 builds with, and each archive says what it holds.
@@ -19,6 +20,15 @@ executable ($ORIGIN) — one libwgpu_native.so in the process, which ThorVG's
 libthorvg-1.so links too, and the same file any other package or Python wheel
 can link. (The artifact type is still "staticLibrary": SwiftPM has no other
 for a library on these platforms.)
+
+On Windows a DLL is linked through its import library, so the bundle holds
+both: the import library (`--library wgpu_native.lib`, a "staticLibrary"
+SwiftPM links as -lwgpu_native) and the DLL (`--dll wgpu_native.dll`, an
+"experimentalWindowsDLL" SwiftPM copies next to the product, where Windows
+loads it from):
+
+            lib/<name>.lib       the import library
+            bin/<name>.dll       the DLL
 
 Several archives given for one library (spirv-cross's) are merged into one,
 since an artifact is one file.
@@ -57,6 +67,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--library", action="append", required=True,
                         help="a library file, or <libname>=<archive>,<archive>,... to merge")
+    parser.add_argument("--dll", action="append", default=[],
+                        help="Windows: a DLL to ship next to the product (its import library "
+                             "goes in --library)")
     parser.add_argument("--triple", action="append", required=True, help="a target triple the libraries are for")
     parser.add_argument("--name", required=True, help="file name of the zip, without .artifactbundle.zip")
     parser.add_argument("--output", type=Path, required=True)
@@ -82,15 +95,32 @@ def main() -> int:
                     sys.exit(f"error: no library {source}")
                 name = source.name
                 shutil.copy2(source, lib_dir / name)
-            if not name.startswith("lib"):
-                sys.exit(f"error: {name}: SwiftPM links a bundle's library as -l<name>, so it must start with lib")
-            artifact = name.split(".", 1)[0][3:]
+            if name.endswith(".lib"):
+                # A Windows library: SwiftPM links <name>.lib as -l<name>.
+                artifact = name[:-len(".lib")]
+            elif name.startswith("lib"):
+                artifact = name.split(".", 1)[0][3:]
+            else:
+                sys.exit(f"error: {name}: SwiftPM links a bundle's library as -l<name>, so it must "
+                         "start with lib (or, on Windows, end in .lib)")
             artifacts[artifact] = {
                 "type": "staticLibrary",
                 "version": args.version,
                 "variants": [{"path": f"lib/{name}", "supportedTriples": args.triple}],
             }
             log(f"{artifact}: lib/{name}")
+        for spec in args.dll:
+            source = Path(spec)
+            if not source.is_file():
+                sys.exit(f"error: no DLL {source}")
+            (bundle / "bin").mkdir(exist_ok=True)
+            shutil.copy2(source, bundle / "bin" / source.name)
+            artifacts[source.name] = {
+                "type": "experimentalWindowsDLL",
+                "version": args.version,
+                "variants": [{"path": f"bin/{source.name}", "supportedTriples": args.triple}],
+            }
+            log(f"{source.name}: bin/{source.name}")
         (bundle / "info.json").write_text(json.dumps({"schemaVersion": "1.0", "artifacts": artifacts}, indent=2) + "\n")
         zip_path = args.output / f"{args.name}.artifactbundle.zip"
         zip_path.unlink(missing_ok=True)

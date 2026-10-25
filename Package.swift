@@ -4,25 +4,15 @@
 import Foundation
 import PackageDescription
 
-/// Build against the sibling checkouts (`../NucleantGeometry`) or against GitHub.
+/// Build against the sibling checkouts (`../NucleantGeometry`) or GitHub.
 ///
-/// Decided the same way in every Nucleant package, so one setting covers the
-/// whole chain: `NUCLEANT_LOCAL_DEV=1|0` in the environment wins; otherwise
-/// local when the sibling checkout exists next to this package — true in a
-/// development tree, never for a clone SwiftPM (or Xcode) made in a
-/// `checkouts` directory: there the "sibling" is the dependency's own
-/// checkout, put next to this one by the same resolution, and taking it as a
-/// path dependency changes the graph under the resolver ("exhausted attempts
-/// to resolve"). Path dependencies are not allowed in a package fetched by
-/// version or revision anyway, so a hardcoded `true` breaks every consumer.
-let localDev: Bool = {
-    if let flag = ProcessInfo.processInfo.environment["NUCLEANT_LOCAL_DEV"] {
-        return ["1", "true", "yes"].contains(flag.lowercased())
-    }
-    let siblings = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-    return siblings.lastPathComponent != "checkouts"
-        && FileManager.default.fileExists(atPath: siblings.appendingPathComponent("NucleantGeometry").path)
-}()
+/// GitHub unless `NUCLEANT_LOCAL_DEV=1` is in the environment: the sibling
+/// checkouts are used only when that turns them on, never just because they
+/// are there. Every Nucleant package reads the same variable, so one setting
+/// covers the whole chain.
+let localDev: Bool = ["1", "true", "yes"].contains(
+    (ProcessInfo.processInfo.environment["NUCLEANT_LOCAL_DEV"] ?? "").lowercased()
+)
 
 func getPlatformTarget() -> PackageDescription.Platform {
     // Package.swift is always compiled and run by the *host* toolchain, even
@@ -51,6 +41,10 @@ func getPlatformTarget() -> PackageDescription.Platform {
     }
 #if os(Linux)
     return .linux
+#elseif os(Windows)
+    // Native, like Linux: the Windows toolchain builds for the machine it
+    // runs on.
+    return .windows
 #else
     return .macOS
 #endif
@@ -225,7 +219,7 @@ func prebuiltBinary(_ name: String, _ archive: String) -> Target {
     return .binaryTarget(name: name, path: "Artifacts/\(archive)")
 }
 
-/// One library of Linux, Android or wasm as its own artifact bundle
+/// One library of Linux, Windows, Android or wasm as its own artifact bundle
 /// (scripts/make_artifactbundle.py), named after the library, the platform
 /// and the architecture — `wgpu_native-linux-x86_64.artifactbundle.zip` —
 /// the way each library is its own xcframework zip on Apple's platforms. The
@@ -233,7 +227,10 @@ func prebuiltBinary(_ name: String, _ archive: String) -> Target {
 /// holds the shared library itself — SwiftPM copies it next to the product
 /// and links it, so libwgpu_native.so stays the one copy ThorVG's library
 /// links too, and an app ships every one of them: on Linux nothing but the
-/// GPU driver comes from the machine.
+/// GPU driver comes from the machine. On Windows the bundle holds the DLL's
+/// import library, which the product links, and the DLL itself, which SwiftPM
+/// copies next to it (an `experimentalWindowsDLL` artifact) — the same
+/// arrangement, the Windows way.
 func prebuiltLibrary(_ library: String) -> Target {
     let platform: String
     switch platformTarget {
@@ -241,6 +238,13 @@ func prebuiltLibrary(_ library: String) -> Target {
         platform = "wasm32"
     case .android:
         platform = "android-\(androidABI())"
+    case .windows:
+        // Native, as on Linux.
+#if arch(arm64)
+        platform = "windows-arm64"
+#else
+        platform = "windows-x86_64"
+#endif
     default:
         // Linux builds are native, so the host's architecture is the target's.
 #if arch(arm64)
@@ -277,6 +281,56 @@ func prebuiltVulkanTargets() -> [Target] {
             ),
             // shaderc's and spirv-cross's headers: the Android targets', of
             // the same refs.
+            .target(
+                name: "CShaderc",
+                dependencies: ["shaderc"],
+                path: "Sources/CShadercAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+            .target(
+                name: "CSPIRVCross",
+                dependencies: ["spirv-cross"],
+                path: "Sources/CSPIRVCrossAndroid",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+            .target(
+                name: "CWgpu",
+                dependencies: ["wgpu_native"],
+                path: "Sources/CWgpuLinux",
+                sources: ["stub.c"],
+                publicHeadersPath: "include",
+                cSettings: [
+                    .headerSearchPath("."),
+                ]
+            ),
+        ]
+    case .windows:
+        return [
+            // vulkan-1.dll (the Khronos loader), wgpu_native.dll,
+            // shaderc_shared.dll, spirv-cross-c-shared.dll — the same sources
+            // as everywhere else, none of them the machine's, as on Linux.
+            prebuiltLibrary("vulkan-loader"),
+            prebuiltLibrary("wgpu_native"),
+            prebuiltLibrary("shaderc"),
+            prebuiltLibrary("spirv-cross"),
+            // Vulkan-Headers 1.4.334, as everywhere, with VK_KHR_win32_surface.
+            .target(
+                name: "CVulkan",
+                dependencies: ["vulkan-loader"],
+                path: "Sources/CVulkanWindowsPrebuilt",
+                sources: ["stub.c"],
+                publicHeadersPath: "include"
+            ),
+            // shaderc's, spirv-cross's and wgpu-native's headers: the ones
+            // Linux and Android build with, of the same refs.
             .target(
                 name: "CShaderc",
                 dependencies: ["shaderc"],
@@ -467,7 +521,11 @@ func prebuiltVulkanTargets() -> [Target] {
 
 func getDependencies() -> [Package.Dependency] {
     var deps = [Package.Dependency]()
-    if localDev {
+    // Local mode takes the sibling only where it is checked out; a dev tree
+    // without NucleantGeometry next to it still gets the GitHub release.
+    let geometry = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("NucleantGeometry")
+    if localDev && FileManager.default.fileExists(atPath: geometry.path) {
         deps.append(.package(path: "../NucleantGeometry"))
     } else {
         deps.append(.package(url: "https://github.com/NucleantUI/NucleantGeometry", .upToNextMinor(from: "0.0.1")))
@@ -874,9 +932,11 @@ func mainTargets() -> [Target] {
                 // .android included: the Android branch of vulkanTargets()
                 // declares its own CWgpu (vendored libwgpu_native.so), and
                 // without it here the target exists but never links. On wasm
-                // CWgpu is webgpu.h on the browser's WebGPU.
-                deps.insert(.byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux, .android, .wasi])), at: 0)
-                if platformTarget != .linux && platformTarget != .android && platformTarget != .wasi {
+                // CWgpu is webgpu.h on the browser's WebGPU. Windows declares
+                // its own as Linux does.
+                deps.insert(.byName(name: "CWgpu", condition: .when(platforms: [.macOS, .linux, .android, .wasi, .windows])), at: 0)
+                if platformTarget != .linux && platformTarget != .android && platformTarget != .wasi
+                    && platformTarget != .windows {
                     deps.append(.byName(name: "CWgpuFW", condition: .when(platforms: [.iOS])))
                 }
                 return deps

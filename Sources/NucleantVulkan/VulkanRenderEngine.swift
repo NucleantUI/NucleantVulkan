@@ -346,6 +346,11 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         if availableDeviceExts.contains("VK_KHR_external_memory_fd") {
             deviceExtensions.append("VK_KHR_external_memory_fd")
         }
+        // Windows' half of the same handoff: there wgpu-native exports the
+        // memory as an NT handle (VK_KHR_external_memory_win32) instead.
+        if availableDeviceExts.contains("VK_KHR_external_memory_win32") {
+            deviceExtensions.append("VK_KHR_external_memory_win32")
+        }
         #if os(Android) && NUCLEANT_ANDROID_USE_AHARDWAREBUFFER
         // Android ThorVG zero-copy, opt-in build only (see
         // ANDROID_USE_AHARDWAREBUFFER in Package.swift): the same idea one

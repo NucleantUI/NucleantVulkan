@@ -1557,6 +1557,22 @@ extern "C"
      */
     WGPUTexture wgpuDeviceCreateTextureWithExportedAHardwareBuffer(WGPUDevice device, WGPUTextureDescriptor const * descriptor, void ** out_buffer);
 
+    /**
+     * Windows' counterpart of wgpuDeviceCreateTextureWithExportedFd: the same
+     * exportable texture, its memory handed back as an NT handle
+     * (VK_KHR_external_memory_win32, OPAQUE_WIN32) that a *different*
+     * VkDevice on the same physical GPU imports via
+     * VkImportMemoryWin32HandleInfoKHR.
+     *
+     * The returned HANDLE belongs to the caller and, unlike an fd, is not
+     * consumed by importing it: CloseHandle it once the import is done.
+     *
+     * Returns NULL (leaving *out_handle NULL) if the active backend is not
+     * Vulkan, the driver lacks VK_KHR_external_memory_win32, or creation
+     * fails.
+     */
+    WGPUTexture wgpuDeviceCreateTextureWithExportedWin32Handle(WGPUDevice device, WGPUTextureDescriptor const * descriptor, void ** out_handle);
+
     void wgpuRenderPassEncoderMultiDrawIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
     void wgpuRenderPassEncoderMultiDrawIndexedIndirect(WGPURenderPassEncoder encoder, WGPUBuffer buffer, uint64_t offset, uint32_t count);
 

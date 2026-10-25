@@ -6,6 +6,9 @@
               by Package.swift).
   * Linux  -> builds the Khronos Vulkan-Loader and produces libvulkan.so*,
               copied to Dependencies/linux/lib.
+  * Windows -> builds the same loader as vulkan-1.dll with its import library,
+              copied to Dependencies/windows/{bin,lib}. Native on Windows;
+              elsewhere cross-compiled (--windows, scripts/windows-cross/).
 
 The sources are cloned into a scratch work directory (scripts/.work by
 default) so repeated runs are incremental. Use --clean to start fresh.
@@ -291,6 +294,69 @@ def build_vulkan_loader(work_dir: Path, ref: str, jobs: int) -> None:
     log(f"installed {target.relative_to(PACKAGE_ROOT)}")
 
 
+# --- Windows: Vulkan-Loader ------------------------------------------------
+#
+# vulkan-1.dll for the release's Windows artifact bundle, from the same tag as
+# Linux's libvulkan.so:
+#
+#   Dependencies/windows/bin/vulkan-1.dll
+#   Dependencies/windows/lib/vulkan-1.lib    the DLL's import library
+#
+# The app ships it beside its executable, the first place Windows looks for a
+# DLL; the driver (ICD) is still the machine's, found through the registry.
+#
+# Native on Windows with CMake's Visual Studio generator, which finds MSVC by
+# itself (no Developer Prompt, and never a MinGW gcc that happens to be on
+# PATH). Elsewhere Ninja, with whatever toolchain CMAKE_TOOLCHAIN_FILE names —
+# scripts/windows-cross/toolchain.cmake in that image.
+
+# --windows-arch -> the Visual Studio generator's platform.
+WINDOWS_PLATFORMS = {"x86_64": "x64", "arm64": "ARM64"}
+
+
+def default_windows_arch() -> str:
+    """The host's architecture on Windows (the build is native there); x86_64
+    for a cross-compile."""
+    if platform.system() == "Windows" and platform.machine().upper() == "ARM64":
+        return "arm64"
+    return "x86_64"
+
+
+def build_vulkan_loader_windows(work_dir: Path, ref: str, jobs: int, arch: str) -> None:
+    require("cmake")
+    src = work_dir / "Vulkan-Loader"
+    sync_repo(VULKAN_LOADER_REPO, ref, src)
+
+    build = src / f"build-windows-{arch}"
+    configure = [
+        "cmake", "-S", str(src), "-B", str(build),
+        "-D", "UPDATE_DEPS=ON",
+        "-D", "CMAKE_BUILD_TYPE=Release",
+        "-D", "BUILD_TESTS=OFF",
+    ]
+    if platform.system() == "Windows":
+        configure += ["-A", WINDOWS_PLATFORMS[arch]]
+    else:
+        require("ninja")
+        configure += ["-G", "Ninja"]
+    run(configure)
+    run(["cmake", "--build", str(build), "--config", "Release", f"-j{jobs}"])
+
+    # loader/ under Ninja, loader/Release/ under Visual Studio.
+    dll = next(iter(sorted((build / "loader").rglob("vulkan-1.dll"))), None)
+    implib = next(iter(sorted((build / "loader").rglob("vulkan-1.lib"))), None)
+    if dll is None or implib is None:
+        sys.exit(f"error: no vulkan-1.dll / vulkan-1.lib produced under {build / 'loader'}")
+
+    dest = DEPENDENCIES_DIR / "windows"
+    (dest / "bin").mkdir(parents=True, exist_ok=True)
+    (dest / "lib").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dll, dest / "bin" / "vulkan-1.dll")
+    shutil.copy2(implib, dest / "lib" / "vulkan-1.lib")
+    log(f"installed {(dest / 'bin' / 'vulkan-1.dll').relative_to(PACKAGE_ROOT)}")
+    log(f"installed {(dest / 'lib' / 'vulkan-1.lib').relative_to(PACKAGE_ROOT)}")
+
+
 # --- Entry point -----------------------------------------------------------
 
 def main() -> int:
@@ -315,6 +381,12 @@ def main() -> int:
                         help="macOS only: build MoltenVK for just this platform, without installing")
     parser.add_argument("--install-only", action="store_true",
                         help="macOS only: install the MoltenVK.xcframework the --platform runs built")
+    parser.add_argument("--windows", action="store_true",
+                        help="build the Windows loader (native on Windows, else cross-compiled "
+                             "through CMAKE_TOOLCHAIN_FILE)")
+    parser.add_argument("--windows-arch", choices=list(WINDOWS_PLATFORMS), default=None,
+                        help="Windows only: architecture (default: the host's on Windows, "
+                             "else x86_64)")
     args = parser.parse_args()
 
     if args.repackage_only:
@@ -329,7 +401,10 @@ def main() -> int:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     system = platform.system()
-    if system == "Darwin" and args.dependencies:
+    if args.windows or system == "Windows":
+        build_vulkan_loader_windows(work_dir, args.ref or VULKAN_LOADER_REF, args.jobs,
+                                    args.windows_arch or default_windows_arch())
+    elif system == "Darwin" and args.dependencies:
         build_moltenvk_dependencies(work_dir, args.ref or MOLTENVK_REF, f"--{args.dependencies}")
     elif system == "Darwin" and args.platform:
         build_moltenvk_platform(work_dir, f"--{args.platform}")
@@ -340,7 +415,7 @@ def main() -> int:
     elif system == "Linux":
         build_vulkan_loader(work_dir, args.ref or VULKAN_LOADER_REF, args.jobs)
     else:
-        sys.exit(f"error: unsupported platform '{system}' (need Darwin or Linux)")
+        sys.exit(f"error: unsupported platform '{system}' (need Darwin, Linux or Windows)")
 
     log("done")
     return 0

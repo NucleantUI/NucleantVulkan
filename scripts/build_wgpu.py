@@ -17,6 +17,11 @@
     the engine links here — a static slice would give each a private copy
     and crossed handles would corrupt/crash.
 
+  * Windows -> builds wgpu_native.dll and installs it with its import library
+    (and the headers) under --prefix (default Dependencies/windows), for the
+    release's Windows artifact bundle. Native on Windows; from Linux or macOS
+    cross-compiled with cargo-xwin (scripts/windows-cross/Dockerfile).
+
   * Linux -> builds libwgpu_native.so for the host triple and installs it
     (plus headers and a generated wgpu-native.pc) under --prefix (default
     /usr/local), so the `CWgpu` systemLibrary target in Package.swift finds
@@ -40,6 +45,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -352,6 +358,105 @@ def build_linux(work_dir: Path, ref: str, prefix: Path) -> None:
     install_linux(so, src, prefix, version)
 
 
+# --- Windows ---------------------------------------------------------------
+#
+# wgpu_native.dll for the release's Windows artifact bundle — the DLL ThorVG's
+# wg engine loads too, so the process keeps one wgpu runtime, as with
+# libwgpu_native.so on Linux:
+#
+#   <prefix>/bin/wgpu_native.dll
+#   <prefix>/lib/wgpu_native.lib     the DLL's import library
+#   <prefix>/include/wgpu.h, webgpu.h
+#
+# cargo names the import library wgpu_native.dll.lib; its wgpu_native.lib is
+# the crate's *static* library (crate-type staticlib), which would give the
+# product a copy of wgpu of its own. So the import library is installed under
+# the name the product links, -lwgpu_native.
+#
+# Native on Windows (MSVC); from Linux or macOS cross-compiled with cargo-xwin,
+# which brings clang-cl/lld-link and Microsoft's CRT and SDK — the
+# scripts/windows-cross/Dockerfile image has it. Either way an MSVC-ABI DLL.
+
+WINDOWS_SO = "wgpu_native.dll"
+
+# --windows-arch -> Rust target triple.
+WINDOWS_TARGETS = {
+    "x86_64": "x86_64-pc-windows-msvc",
+    "arm64": "aarch64-pc-windows-msvc",
+}
+
+
+def default_windows_arch() -> str:
+    """The host's architecture on Windows (the build is native there); x86_64
+    for a cross-compile."""
+    if platform.system() == "Windows" and platform.machine().upper() == "ARM64":
+        return "arm64"
+    return "x86_64"
+
+
+def xwin_environment(src: Path, triple: str, env: dict) -> dict:
+    """cargo-xwin's environment for `triple` — clang-cl and lld-link against
+    Microsoft's CRT and SDK — for a plain cargo build, with MS compatibility
+    added to bindgen's clang arguments. bindgen runs libclang over wgpu.h, and
+    the MSVC stdint.h spells UINT32_MAX `0xffffffffui32`, a literal only an
+    MS-compatible clang reads: without it every WGPU_*_UNDEFINED constant
+    (UINT32_MAX, SIZE_MAX) drops out of the bindings. cargo-xwin sets that
+    variable itself, so `cargo xwin build` cannot be told."""
+    listing = subprocess.run(["cargo", "xwin", "env", "--target", triple], cwd=src, env=env,
+                             check=True, capture_output=True, text=True).stdout
+    env = dict(env)
+    for line in listing.splitlines():
+        match = re.fullmatch(r'export (\w+)="(.*)";', line.strip())
+        if match:
+            env[match[1]] = match[2]
+    key = "BINDGEN_EXTRA_CLANG_ARGS_" + triple.replace("-", "_")
+    env[key] = (env.get(key, "") + " -fms-extensions -fms-compatibility").strip()
+    return env
+
+
+def cargo_build_windows(src: Path, triple: str) -> Path:
+    """Release-build wgpu-native for one Windows triple; return the build's
+    output directory."""
+    require("cargo")
+    require("rustup")
+    env = dict(os.environ)
+    cargo_bin = Path.home() / ".cargo" / "bin"
+    env["PATH"] = str(cargo_bin) + os.pathsep + env.get("PATH", "")
+    # Inside the repo, so the std lands on the toolchain rust-toolchain.toml
+    # pins (see ensure_targets).
+    run(["rustup", "target", "add", triple], cwd=src, env=env)
+    fetch_crates(src, env)
+    if platform.system() != "Windows":
+        require("cargo-xwin")
+        env = xwin_environment(src, triple, env)
+    run(["cargo", "build", "--release", "--target", triple], cwd=src, env=env)
+    out = src / "target" / triple / "release"
+    for name in (WINDOWS_SO, WINDOWS_SO + ".lib"):
+        if not (out / name).is_file():
+            sys.exit(f"error: expected {name} not produced under {out}")
+    return out
+
+
+def build_windows(work_dir: Path, ref: str, arch: str, prefix: Path) -> None:
+    src = work_dir / "wgpu-native"
+    sync_repo(WGPU_REPO, ref, src)
+    out = cargo_build_windows(src, WINDOWS_TARGETS[arch])
+
+    bin_dir = prefix / "bin"
+    lib_dir = prefix / "lib"
+    include_dir = prefix / "include"
+    for d in (bin_dir, lib_dir, include_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(out / WINDOWS_SO, bin_dir / WINDOWS_SO)
+    shutil.copy2(out / (WINDOWS_SO + ".lib"), lib_dir / "wgpu_native.lib")
+    # Flat, as everywhere: wgpu.h #includes "webgpu.h" from beside it.
+    shutil.copy2(src / "ffi" / "wgpu.h", include_dir / "wgpu.h")
+    shutil.copy2(src / "ffi" / "webgpu-headers" / "webgpu.h", include_dir / "webgpu.h")
+    log(f"wgpu-native ({arch}) installed -> {bin_dir / WINDOWS_SO}")
+    log(f"import library installed -> {lib_dir / 'wgpu_native.lib'}")
+    log(f"headers installed -> {include_dir}")
+
+
 # --- Android ---------------------------------------------------------------
 #
 # Unlike Linux there is no system prefix and no pkg-config: the .so is vendored
@@ -564,8 +669,9 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ref", default=WGPU_REF, help="git tag/branch to build")
     parser.add_argument("--work-dir", type=Path, default=DEFAULT_WORK_DIR)
-    parser.add_argument("--prefix", type=Path, default=Path("/usr/local"),
-                        help="Linux only: install prefix (default: /usr/local)")
+    parser.add_argument("--prefix", type=Path, default=None,
+                        help="Linux: install prefix (default: /usr/local); "
+                             "Windows: install root (default: Dependencies/windows)")
     parser.add_argument("--clean", action="store_true",
                         help="wipe the work directory before building")
     # Android is never the host, so unlike macOS/Linux it cannot be inferred —
@@ -580,6 +686,14 @@ def main() -> int:
                              "ANDROID_SDK_ROOT/ndk)")
     parser.add_argument("--api", type=int, default=ANDROID_API_DEFAULT,
                         help=f"Android only: API level (default: {ANDROID_API_DEFAULT})")
+    # Like Android, Windows can be built from another host (cross-compiled),
+    # so it can be asked for explicitly; on a Windows host it is the default.
+    parser.add_argument("--windows", action="store_true",
+                        help="build for Windows (native on Windows, else cross-compiled "
+                             "with cargo-xwin)")
+    parser.add_argument("--windows-arch", choices=list(WINDOWS_TARGETS), default=None,
+                        help="Windows only: architecture (default: the host's on Windows, "
+                             "else x86_64)")
     parser.add_argument("--apple-target", default=None,
                         help="macOS only: build just this Rust triple, without packaging "
                              f"(choices: {', '.join(ALL_TARGETS)})")
@@ -602,14 +716,18 @@ def main() -> int:
         return 0
 
     system = platform.system()
-    if system == "Darwin" and args.apple_target:
+    if args.windows or system == "Windows":
+        prefix = args.prefix or DEPENDENCIES_DIR / "windows"
+        build_windows(work_dir, args.ref, args.windows_arch or default_windows_arch(),
+                      prefix.resolve())
+    elif system == "Darwin" and args.apple_target:
         build_apple_target(work_dir, args.ref, args.apple_target)
     elif system == "Darwin":
         build_apple(work_dir, args.ref)
     elif system == "Linux":
-        build_linux(work_dir, args.ref, args.prefix.resolve())
+        build_linux(work_dir, args.ref, (args.prefix or Path("/usr/local")).resolve())
     else:
-        sys.exit(f"error: unsupported platform '{system}' (need Darwin or Linux)")
+        sys.exit(f"error: unsupported platform '{system}' (need Darwin, Linux or Windows)")
 
     log("done")
     return 0
