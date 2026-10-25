@@ -57,12 +57,14 @@ private final class TestWindow {
     let hwnd: HWND
 
     init(width: Int32, height: Int32) throws {
-        instance = try #require(GetModuleHandleW(nil))
-        hwnd = try #require("STATIC".withCString(encodedAs: UTF16.self) { className in
+        let module = try #require(GetModuleHandleW(nil))
+        let window = "STATIC".withCString(encodedAs: UTF16.self) { className in
             "NucleantVulkanTests".withCString(encodedAs: UTF16.self) { title in
-                CreateWindowExW(0, className, title, 0, 0, 0, width, height, nil, nil, instance, nil)
+                CreateWindowExW(0, className, title, 0, 0, 0, width, height, nil, nil, module, nil)
             }
-        })
+        }
+        instance = module
+        hwnd = try #require(window)
     }
 
     /// The client area, in pixels.
