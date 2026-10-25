@@ -94,8 +94,10 @@ private final class TestWindow {
 
             // 4×4 BGRA, every pixel different.
             let width = 4, height = 4
-            let pixels: [UInt8] = (0..<width * height).flatMap { i in
-                [UInt8(i * 16), UInt8(255 - i * 16), UInt8(i * 7), 255]
+            var pixels: [UInt8] = []
+            for i in 0..<width * height {
+                let blue = UInt8(i * 16), green = UInt8(255 - i * 16), red = UInt8(i * 7)
+                pixels += [blue, green, red, 255]
             }
             let node = try engine.makeExternalTextureNode(width: width, height: height)
             let written = pixels.withUnsafeBytes { bytes in
