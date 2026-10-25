@@ -63,9 +63,11 @@ DEFAULT_WORK_DIR = SCRIPT_DIR / ".work"
 
 WGPU_REPO = "https://github.com/NucleantUI/wgpu-native.git"
 # v29.0.1.1 plus wgpuDeviceCreateTextureWithExportedFd — the exportable-memory
-# texture the ThorVG handoff imports on Linux and Android. Upstream has no
-# equivalent, so this tag is the fork's own revision of that upstream release.
-WGPU_REF = "v29.0.1.2"
+# texture the ThorVG handoff imports on Linux and Android — and, since
+# v29.0.1.3, its Windows twin wgpuDeviceCreateTextureWithExportedWin32Handle.
+# Upstream has no equivalent, so this tag is the fork's own revision of that
+# upstream release.
+WGPU_REF = "v29.0.1.3"
 
 DYLIB = "libwgpu_native.dylib"
 

@@ -28,8 +28,8 @@ you can always just test only building for windows..
 - `WgpuContext` on Windows exports each target's memory as an NT handle
   (`nativeVulkanExportedWin32Handle()`), through
   `wgpuDeviceCreateTextureWithExportedWin32Handle` — a new function in the
-  wgpu-native fork, the Windows twin of the fd one. **Needs the fork's
-  v29.0.1.3 tag pushed, and `WGPU_REF` bumped to it.**
+  wgpu-native fork, the Windows twin of the fd one (tag v29.0.1.3, which
+  `WGPU_REF` builds).
 - Scripts: `build_wgpu.py`, `build_vulkan.py`, `build_shader_tools.py` take
   `--windows` (the default on a Windows host); `make_artifactbundle.py` takes
   `--dll`.
