@@ -21,8 +21,9 @@
 #                checked;
 #   4. verify    a new package that depends on the release by its version and
 #                builds and runs against it on Linux, in Swift's image with
-#                nothing installed: the URLs, checksums and manifest as a
-#                consumer gets them, and the libraries an app ships.
+#                nothing installed, and on Windows: the URLs, checksums and
+#                manifest as a consumer gets them, and the libraries an app
+#                ships.
 #
 # The tag and master are pushed with GITHUB_TOKEN, so they start no workflow.
 
@@ -228,4 +229,50 @@ jobs:
           print("NucleantVulkan resolved and linked")
           EOF
           swift build
+          swift run Consumer
+
+  # The same on Windows, where the archives are DLL artifact bundles: SwiftPM
+  # downloads and checksums them and copies each DLL next to the product,
+  # which build-deps.yml's windows-test (from Artifacts/) never goes through.
+  # Windows' manifest only evaluates on Windows, so an archive left on
+  # Artifacts/ there would show here and nowhere else.
+  verify-windows:
+    needs: release
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: compnerd/gha-setup-swift@v0.5.1
+        with:
+          swift-version: swift-6.3.3-release
+          swift-build: 6.3.3-RELEASE
+      - name: Build a package that depends on the release
+        run: |
+          mkdir -p consumer/Sources/Consumer && cd consumer
+          cat > Package.swift <<EOF
+          // swift-tools-version: 6.2
+          import PackageDescription
+
+          let package = Package(
+              name: "Consumer",
+              platforms: [.macOS(.v14)],
+              dependencies: [
+                  .package(url: "https://github.com/$GITHUB_REPOSITORY", exact: "$TAG"),
+              ],
+              targets: [
+                  .executableTarget(name: "Consumer", dependencies: [
+                      .product(name: "NucleantVulkan", package: "NucleantVulkan"),
+                  ]),
+              ]
+          )
+          EOF
+          cat > Sources/Consumer/main.swift <<'EOF'
+          import NucleantVulkan
+
+          print("NucleantVulkan resolved and linked")
+          EOF
+          swift build
+          # The release's DLLs, copied next to the product
+          ls "$(swift build --show-bin-path)"/*.dll
           swift run Consumer
