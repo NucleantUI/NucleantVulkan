@@ -230,7 +230,10 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// compositor, which swaps red and blue in everything drawn.
     ///
     /// Seeded with the Apple-native choice and replaced by
-    /// `chooseSurfaceFormat()` before the swapchain is created.
+    /// `chooseSurfaceFormat()` before the render pass is built. The render
+    /// pass, the composite pipeline and the swapchain all take it, and must
+    /// agree: WebGPU rejects every frame when they don't (Chrome on Linux
+    /// prefers RGBA canvases), where native drivers let it slip.
     private var colorFormat = VK_FORMAT_B8G8R8A8_UNORM
 
     private var renderPass:      VkRenderPass?
@@ -412,6 +415,9 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         self.descriptorPool = try makeEngineDescriptorPool(device: device, maxSets: 256)
 
         // All stored lets are set — instance methods are usable from here on.
+        // The surface's format first: the render pass and the composite
+        // pipeline built against it must match the swapchain's images.
+        colorFormat = chooseSurfaceFormat()
         try createRenderPass()
         try createSyncObjects()
         try createCompositePipeline()
@@ -1097,8 +1103,6 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     private func createSwapchain() throws {
         var caps = VkSurfaceCapabilitiesKHR()
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps)
-
-        colorFormat = chooseSurfaceFormat()
 
         var newExtent = caps.currentExtent
         if newExtent.width == UInt32.max {
