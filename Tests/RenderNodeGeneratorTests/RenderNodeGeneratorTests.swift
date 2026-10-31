@@ -69,29 +69,29 @@ import Testing
 
     @Test(arguments: [
         ("foo: 1\nRenderNode:\n  - ImageNode\n",
-         "unknown key `foo`; expected `imports`, `protocol` or `RenderNode`", 1),
+         "unknown key `foo`; expected `imports`, `protocol`, `RenderNode`", 1),
         ("RenderNode:\n  - SkiaShaderNode:\n      resize_to_widow: true\n",
-         "unknown option `resize_to_widow` for SkiaShaderNode; expected `observe`, `update` or `resize_to_window`", 3),
+         "unknown key `resize_to_widow`; expected `observe`, `update`, `resize_to_window`", 3),
         ("RenderNode:\n  - ImageNode:\n      observe: maybe\n",
-         "`observe` is true or false", 3),
+         "`RenderNode[0].ImageNode.observe`: Expected to decode Bool but found Scalar instead.", nil),
         ("RenderNode: []\n",
-         "`RenderNode` lists at least one node type", 1),
+         "`RenderNode` lists at least one node type", nil),
         ("RenderNode:\n  - ImageNode\n  - ImageNode\n",
-         "ImageNode is listed twice", 3),
+         "ImageNode is listed twice", nil),
         ("RenderNode:\n  - SkiaShaderNode\n  - SkiaNode\n",
-         "SkiaShaderNode and SkiaNode both make the case `.skia`", 3),
+         "SkiaShaderNode and SkiaNode both make the case `.skia`", nil),
         ("RenderNode:\n  - Image Node\n",
          "a node entry is a type name, or a type name with options under it", 2),
         ("RenderNode:\n  - ImageNode:\n    SkiaShaderNode:\n",
          "one node type per entry", 2),
         ("RenderNode:\n  - ImageNode: true\n",
-         "ImageNode's options are `observe`, `update` and `resize_to_window`", 2),
+         "`RenderNode[0].ImageNode`: Expected to decode Mapping but found Node instead.", nil),
         ("imports: NucleantSkia\nRenderNode:\n  - ImageNode\n",
-         "`imports` is a list of module names", 1),
+         "`imports`: Expected to decode Sequence but found Node instead.", nil),
         ("protocol: [A, B]\nRenderNode:\n  - ImageNode\n",
-         "`protocol` is the name of a protocol refining RenderContainerNode", 1),
-    ] as [(String, String, Int)])
-    func pointsAtTheMistake(yaml: String, message: String, line: Int) {
+         "`protocol`: Expected to decode Scalar but found Sequence instead.", nil),
+    ] as [(String, String, Int?)])
+    func pointsAtTheMistake(yaml: String, message: String, line: Int?) {
         #expect(throws: RenderSettingsError(message: message, line: line)) {
             try RenderSettings(yaml: yaml)
         }

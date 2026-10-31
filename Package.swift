@@ -87,6 +87,10 @@ func wasmLibDir() -> String {
 
 let platformTarget = getPlatformTarget()
 
+/// The RenderNodeBuilder plugin and its generator run on the build machine, a
+/// desktop; a build for wasm or Android leaves them out, Yams with them.
+let buildsRenderNodeBuilder = platformTarget == .macOS || platformTarget == .linux || platformTarget == .windows
+
 // Set by pyswiftkit-builder for a wheel build. It distinguishes the two macOS
 // modes — `uv run` against a wheel, versus the Xcode app that embeds this
 // package — which differ in whether a dependency should be a bare dylib or a
@@ -548,7 +552,9 @@ func getDependencies() -> [Package.Dependency] {
     }
     // Reads render-settings.yml for the RenderNodeBuilder plugin's generator,
     // which runs on the build machine; fetched only where the plugin is used.
-    deps.append(.package(url: "https://github.com/jpsim/Yams", from: "6.0.0"))
+    if buildsRenderNodeBuilder {
+        deps.append(.package(url: "https://github.com/jpsim/Yams", from: "6.0.0"))
+    }
     return deps
 }
 
@@ -1010,7 +1016,9 @@ func renderNodeBuilderTargets() -> [Target] {
 func getTargets() -> [Target] {
     var targets = mainTargets()
     targets.append(contentsOf: libraryTargets())
-    targets.append(contentsOf: renderNodeBuilderTargets())
+    if buildsRenderNodeBuilder {
+        targets.append(contentsOf: renderNodeBuilderTargets())
+    }
     return targets
 }
 
@@ -1026,7 +1034,7 @@ func getProducts() -> [Product] {
     let vulkanTargets: [String] = platformTarget == .linux || platformTarget == .android
         ? ["NucleantVulkan"]
         : ["NucleantVulkan", "CVulkan"]
-    return [
+    var products: [Product] = [
         .library(
             name: "NucleantVulkan",
             targets: vulkanTargets
@@ -1039,11 +1047,14 @@ func getProducts() -> [Product] {
             name: "NucleantShader",
             targets: ["NucleantShader"]
         ),
-        .plugin(
+    ]
+    if buildsRenderNodeBuilder {
+        products.append(.plugin(
             name: "RenderNodeBuilder",
             targets: ["RenderNodeBuilder"]
-        ),
-    ]
+        ))
+    }
+    return products
 }
 
 let package = Package(

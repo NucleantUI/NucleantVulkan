@@ -501,13 +501,15 @@ struct WebGPUStandInTests {
 
     @Test func engineCompositesAPixelBufferNodeOntoTheCanvas() throws {
         let engine = try VulkanRenderEngine<TestSlot>(canvasSelector: "#test-canvas", getSize: { (64, 48) })
-        let node = try engine.makePixelBufferNode(width: 16, height: 8, scale: 2)
+        let node = try engine.renderDevice.makePixelBufferNode(width: 16, height: 8, scale: 2)
         node.write(rgba: [UInt32](repeating: 0xFF00_80FF, count: 16 * 8))
         engine.append(TestSlot(id: 1, context: .pixels(node)))
         for _ in 0..<3 { engine.drawFrame(1.0 / 60.0) }
         engine.waitForPreviousFrame()
-        #expect(engine.readable.contains(1))
+        #expect(engine.renderDevice.readable.contains(1))
+        // The window only shows the node; its maker frees it.
         engine.remove(id: 1)
+        node.destroyResources(engine.renderDevice)
     }
 }
 
@@ -965,12 +967,12 @@ final class TestSlot: RenderContainerNode, @unchecked Sendable {
         if case .pixels(let node) = context { observe(node) }
     }
 
-    func update(engine: Engine, cmd: VkCommandBuffer) {
-        if case .pixels(let node) = context { node.update(engine, slot: self, cmd: cmd) }
+    func update(device: Device, cmd: VkCommandBuffer) {
+        if case .pixels(let node) = context { node.update(device, slot: self, cmd: cmd) }
     }
 
-    func destroyResources(engine: Engine) {
-        if case .pixels(let node) = context { node.destroyResources(engine) }
+    func destroyResources(device: Device) {
+        if case .pixels(let node) = context { node.destroyResources(device) }
     }
 
     func getImageView() -> VkImageView? {

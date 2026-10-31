@@ -43,6 +43,7 @@ public struct RenderSettings: Equatable {
     }
 }
 
+
 public struct RenderSettingsError: Error, Equatable, CustomStringConvertible {
     public var message: String
     /// Where in the settings file, when it is about one place in it.
@@ -53,74 +54,33 @@ public struct RenderSettingsError: Error, Equatable, CustomStringConvertible {
     }
 }
 
-extension RenderSettingsError {
-    init(_ message: String, at node: Node?) {
-        self.init(message: message, line: node?.mark?.line)
-    }
-}
-
 extension RenderSettings {
 
+    /// Decodes a settings file. What decoding leaves unchecked is checked
+    /// here: the names are Swift names, and every node type makes a case of
+    /// its own.
     public init(yaml: String) throws {
-        guard let root = try Yams.compose(yaml: yaml), let top = root.mapping else {
-            throw RenderSettingsError("expected `imports`, `protocol` and `RenderNode`", at: nil)
+        do {
+            self = try YAMLDecoder().decode(RenderSettings.self, from: yaml)
+        } catch let error as DecodingError {
+            throw RenderSettingsError(error)
         }
-        var listsNodes = false
-        for (key, value) in top {
-            switch key.scalar?.string {
-            case "imports":
-                imports = try Self.moduleNames(in: value)
-            case "protocol":
-                guard let name = value.scalar?.string, Self.isName(name, dotted: true) else {
-                    throw RenderSettingsError("`protocol` is the name of a protocol refining RenderContainerNode", at: value)
-                }
-                conformance = name
-            case "RenderNode":
-                listsNodes = true
-                nodes = try Self.nodes(in: value)
-            default:
-                throw RenderSettingsError(
-                    "unknown key `\(key.scalar?.string ?? "")`; expected `imports`, `protocol` or `RenderNode`",
-                    at: key
-                )
+        guard !nodes.isEmpty else {
+            throw RenderSettingsError(message: "`RenderNode` lists at least one node type")
+        }
+        for (index, node) in nodes.enumerated() {
+            if let other = nodes[..<index].first(where: { $0.caseName == node.caseName }) {
+                throw RenderSettingsError(message: other.type == node.type
+                    ? "\(node.type) is listed twice"
+                    : "\(other.type) and \(node.type) both make the case `.\(node.caseName)`")
             }
         }
-        guard listsNodes else {
-            throw RenderSettingsError("missing `RenderNode`, the list of node types", at: nil)
+        for name in imports where !Self.isName(name, dotted: true) {
+            throw RenderSettingsError(message: "`\(name)` in `imports` is not a module name")
         }
-    }
-
-    private static func moduleNames(in value: Node) throws -> [String] {
-        if value.null != nil { return [] }
-        guard let list = value.sequence else {
-            throw RenderSettingsError("`imports` is a list of module names", at: value)
+        guard Self.isName(conformance, dotted: true) else {
+            throw RenderSettingsError(message: "`protocol` is the name of a protocol refining RenderContainerNode")
         }
-        return try list.map { entry in
-            guard let name = entry.scalar?.string, isName(name, dotted: true) else {
-                throw RenderSettingsError("`imports` is a list of module names", at: entry)
-            }
-            return name
-        }
-    }
-
-    private static func nodes(in value: Node) throws -> [NodeSettings] {
-        guard let list = value.sequence, !list.isEmpty else {
-            throw RenderSettingsError("`RenderNode` lists at least one node type", at: value)
-        }
-        var nodes: [NodeSettings] = []
-        for entry in list {
-            let node = try NodeSettings(entry)
-            if let other = nodes.first(where: { $0.caseName == node.caseName }) {
-                throw RenderSettingsError(
-                    other.type == node.type
-                        ? "\(node.type) is listed twice"
-                        : "\(other.type) and \(node.type) both make the case `.\(node.caseName)`",
-                    at: entry
-                )
-            }
-            nodes.append(node)
-        }
-        return nodes
     }
 
     /// A Swift identifier, or with `dotted` several joined by dots (`Module.Type`).
@@ -133,41 +93,115 @@ extension RenderSettings {
     }
 }
 
-extension RenderSettings.NodeSettings {
+extension RenderSettings: Decodable {
 
-    /// `- ImageNode`, or `- SkiaShaderNode:` with options under it.
-    init(_ entry: Node) throws {
-        guard let mapping = entry.mapping else {
-            guard let type = entry.scalar?.string, RenderSettings.isName(type) else {
-                throw RenderSettingsError("a node entry is a type name, or a type name with options under it", at: entry)
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case imports
+        case conformance = "protocol"
+        case nodes = "RenderNode"
+    }
+
+    public init(from decoder: Decoder) throws {
+        try SettingsKey.refuseUnknownKeys(in: decoder, expected: CodingKeys.allCases.map(\.rawValue))
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.nodes) else {
+            throw RenderSettingsError(message: "missing `RenderNode`, the list of node types")
+        }
+        imports = try container.decodeIfPresent([String].self, forKey: .imports) ?? []
+        conformance = try container.decodeIfPresent(String.self, forKey: .conformance) ?? "RenderContainerNode"
+        nodes = try container.decode([NodeSettings].self, forKey: .nodes)
+    }
+}
+
+extension RenderSettings.NodeSettings: Decodable {
+
+    /// `- ImageNode`, or `- SkiaShaderNode:` with its options under it.
+    init(from decoder: Decoder) throws {
+        let line = decoder.mark?.line
+        if let type = try? decoder.singleValueContainer().decode(String.self) {
+            guard RenderSettings.isName(type) else {
+                throw RenderSettingsError(message: "a node entry is a type name, or a type name with options under it", line: line)
             }
             self.init(type: type)
             return
         }
-        guard mapping.count == 1, let (key, options) = mapping.first,
-              let type = key.scalar?.string, RenderSettings.isName(type)
-        else {
-            throw RenderSettingsError("one node type per entry", at: entry)
+        let entry = try decoder.container(keyedBy: SettingsKey.self)
+        guard entry.allKeys.count == 1, let key = entry.allKeys.first, RenderSettings.isName(key.stringValue) else {
+            throw RenderSettingsError(message: "one node type per entry", line: line)
         }
-        self.init(type: type)
-        if options.null != nil { return }
-        guard let options = options.mapping else {
-            throw RenderSettingsError("\(type)'s options are `observe`, `update` and `resize_to_window`", at: options)
+        let options = try entry.decodeIfPresent(Options.self, forKey: key)
+        self.init(
+            type: key.stringValue,
+            observe: options?.observe ?? true,
+            update: options?.update ?? true,
+            resizeToWindow: options?.resizeToWindow ?? false
+        )
+    }
+
+    struct Options: Decodable {
+        var observe: Bool?
+        var update: Bool?
+        var resizeToWindow: Bool?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case observe
+            case update
+            case resizeToWindow = "resize_to_window"
         }
-        for (option, value) in options {
-            guard let flag = value.bool else {
-                throw RenderSettingsError("`\(option.scalar?.string ?? "")` is true or false", at: value)
-            }
-            switch option.scalar?.string {
-            case "observe":          observe = flag
-            case "update":           update = flag
-            case "resize_to_window": resizeToWindow = flag
-            default:
-                throw RenderSettingsError(
-                    "unknown option `\(option.scalar?.string ?? "")` for \(type); expected `observe`, `update` or `resize_to_window`",
-                    at: option
-                )
-            }
+
+        init(from decoder: Decoder) throws {
+            try SettingsKey.refuseUnknownKeys(in: decoder, expected: CodingKeys.allCases.map(\.rawValue))
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            observe = try container.decodeIfPresent(Bool.self, forKey: .observe)
+            update = try container.decodeIfPresent(Bool.self, forKey: .update)
+            resizeToWindow = try container.decodeIfPresent(Bool.self, forKey: .resizeToWindow)
         }
+    }
+}
+
+/// Any key: a node entry's type name, and a typo, which decoding would
+/// otherwise skip without a word.
+struct SettingsKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
+
+    static func refuseUnknownKeys(in decoder: Decoder, expected: [String]) throws {
+        let keys = try decoder.container(keyedBy: SettingsKey.self).allKeys
+        if let unknown = keys.first(where: { !expected.contains($0.stringValue) }) {
+            throw RenderSettingsError(
+                message: "unknown key `\(unknown.stringValue)`; expected \(expected.map { "`\($0)`" }.joined(separator: ", "))",
+                line: decoder.mark?.line
+            )
+        }
+    }
+}
+
+extension RenderSettingsError {
+    init(message: String) {
+        self.init(message: message, line: nil)
+    }
+
+    /// The decoder's own complaint, with the key path it is about. One the
+    /// settings types threw themselves comes back as it was: YAMLDecoder
+    /// wraps whatever a `Decodable` throws.
+    init(_ error: DecodingError) {
+        let context: DecodingError.Context
+        switch error {
+        case .typeMismatch(_, let c), .valueNotFound(_, let c), .keyNotFound(_, let c), .dataCorrupted(let c):
+            context = c
+        @unknown default:
+            self.init(message: "\(error)")
+            return
+        }
+        if let own = context.underlyingError as? RenderSettingsError {
+            self = own
+            return
+        }
+        let dotted = context.codingPath.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined()
+        let path = dotted.hasPrefix(".") ? String(dotted.dropFirst()) : dotted
+        self.init(message: path.isEmpty ? context.debugDescription : "`\(path)`: \(context.debugDescription)")
     }
 }
