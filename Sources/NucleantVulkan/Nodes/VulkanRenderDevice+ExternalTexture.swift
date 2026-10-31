@@ -1,5 +1,5 @@
 //
-//  VulkanRenderEngine+ExternalTexture.swift
+//  VulkanRenderDevice+ExternalTexture.swift
 //  NucleantVulkan
 //
 //  Factory, resize and write paths for `ExternalTextureNode` — see that file
@@ -16,8 +16,8 @@
 //      buffer to give (CEF with shared textures off, or unavailable).
 //
 //  Both record their copy into the node's own command buffer and submit it
-//  on the graphics queue — the queue every frame's composite is submitted
-//  on — then wait for it. Queue order does the rest: the barrier in front of
+//  on the device's queue — the queue every window's composite is submitted
+//  on — then wait for it (that submission only, not the queue). Queue order does the rest: the barrier in front of
 //  the copy waits out any composite still sampling the previous frame, the
 //  one after it makes the next composite see this one.
 //
@@ -27,7 +27,7 @@ import VulkanCore
 import IOSurface
 #endif
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
     /// The format both ends agree on: every external producer handled here
     /// (CEF's IOSurfaces, its software `OnPaint` buffer) delivers BGRA8, and
@@ -117,7 +117,7 @@ extension VulkanRenderEngine {
     /// at the new size is swapped into the same node, so its slot, id and
     /// z-order stay. The new image starts empty — cleared on its first write —
     /// until the producer delivers a frame at the new size. `id` is the node's
-    /// composite slot, whose cached descriptor still names the old view.
+    /// composite slot, unpublished until the next write.
     /// Returns false, node untouched, when the new image can't be made.
     @discardableResult
     public func resizeExternalTextureNode(
@@ -133,15 +133,19 @@ extension VulkanRenderEngine {
         do {
             created = try makeExternalTextureImage(width: width, height: height)
         } catch {
-            print("VulkanRenderEngine: external texture resize to \(width)x\(height) failed: \(error)")
+            print("VulkanRenderDevice: external texture resize to \(width)x\(height) failed: \(error)")
             return false
         }
 
-        vkDeviceWaitIdle(device)
-        vkDestroyImageView(device, node.imageView, nil)
-        vkDestroyImage(device, node.image, nil)
-        if let memory = node.memory {
-            vkFreeMemory(device, memory, nil)
+        // A frame still in flight, in any window, may sample the old image.
+        let vkDevice = device
+        let oldView = node.imageView, oldImage = node.image, oldMemory = node.memory
+        releaseAfterInFlightWork {
+            vkDestroyImageView(vkDevice, oldView, nil)
+            vkDestroyImage(vkDevice, oldImage, nil)
+            if let oldMemory {
+                vkFreeMemory(vkDevice, oldMemory, nil)
+            }
         }
         node.image         = created.image
         node.imageView     = created.view
@@ -154,7 +158,9 @@ extension VulkanRenderEngine {
         // Sized for the old frames; the producer presents new surfaces now.
         node.releaseImportedSurfaces(self)
         #endif
-        invalidateComposite(id: id)
+        // Unpublished until a write lands in the new image; every window's
+        // composite set rebuilds from the new view on its own.
+        readable.remove(id)
         return true
     }
 
@@ -174,7 +180,7 @@ extension VulkanRenderEngine {
         x:         Int = 0,
         y:         Int = 0
     ) -> Bool {
-        guard let index = node.importedSurfaceIndex(ioSurface, engine: self) else { return false }
+        guard let index = node.importedSurfaceIndex(ioSurface, device: self) else { return false }
         let imported = node.importedSurfaces[index]
         let width  = min(imported.width,  Int(node.width)  - x)
         let height = min(imported.height, Int(node.height) - y)
@@ -247,7 +253,7 @@ extension VulkanRenderEngine {
         let copyHeight = min(height, Int(node.height) - y)
         guard copyWidth > 0, copyHeight > 0 else { return true }
         let byteCount = bytesPerRow * height
-        guard let staging = node.stagingBuffer(byteCount: byteCount, engine: self) else { return false }
+        guard let staging = node.stagingBuffer(byteCount: byteCount, device: self) else { return false }
         staging.mapped.copyMemory(from: pixels, byteCount: byteCount)
 
         return submitWrite(to: node) { cmd in
@@ -279,7 +285,7 @@ extension VulkanRenderEngine {
         to node: ExternalTextureNode<RenderNode>,
         _ copy: (VkCommandBuffer) -> Void
     ) -> Bool {
-        guard let cmd = node.writeCommandBuffer(engine: self), let fence = node.writeFence else { return false }
+        guard let cmd = node.writeCommandBuffer(device: self), let fence = node.writeFence else { return false }
         vkResetCommandBuffer(cmd, 0)
         var begin = VkCommandBufferBeginInfo()
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
@@ -331,21 +337,11 @@ extension VulkanRenderEngine {
         )
         vkEndCommandBuffer(cmd)
 
-        var cmdOpt: VkCommandBuffer? = cmd
-        let result: VkResult = withUnsafePointer(to: &cmdOpt) { cmdPtr in
-            var submit = VkSubmitInfo()
-            submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO
-            submit.commandBufferCount = 1
-            submit.pCommandBuffers = cmdPtr
-            return vkQueueSubmit(graphicsQueue, 1, &submit, fence)
-        }
+        let result = submitAndWait(cmd, fence: fence)
         guard result == VK_SUCCESS else {
-            print("VulkanRenderEngine: external texture write submit failed (\(result.rawValue))")
+            print("VulkanRenderDevice: external texture write submit failed (\(result.rawValue))")
             return false
         }
-        var fenceOpt: VkFence? = fence
-        vkWaitForFences(device, 1, &fenceOpt, VK_TRUE, UInt64.max)
-        vkResetFences(device, 1, &fenceOpt)
 
         node.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         node.hasContent = true
@@ -359,86 +355,7 @@ extension VulkanRenderEngine {
     /// never for a frame path.
     public func readExternalTexture(_ node: ExternalTextureNode<RenderNode>) -> [UInt8]? {
         guard node.hasContent else { return nil }
-        let width = Int(node.width), height = Int(node.height)
-        let byteCount = width * height * 4
-        guard let readback = makeHostBuffer(byteCount: byteCount, usage: VK_BUFFER_USAGE_TRANSFER_DST_BIT) else {
-            return nil
-        }
-        defer {
-            vkUnmapMemory(device, readback.memory)
-            vkDestroyBuffer(device, readback.buffer, nil)
-            vkFreeMemory(device, readback.memory, nil)
-        }
-        oneTimeSubmit { cmd in
-            engineImageBarrier(
-                cmd,
-                image:     node.image,
-                srcLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                srcAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                srcStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                dstLayout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                dstAccess: VkAccessFlags(VK_ACCESS_TRANSFER_READ_BIT.rawValue),
-                dstStage:  VK_PIPELINE_STAGE_TRANSFER_BIT
-            )
-            var region = VkBufferImageCopy()
-            region.imageSubresource = VkImageSubresourceLayers(
-                aspectMask: VkImageAspectFlags(VK_IMAGE_ASPECT_COLOR_BIT.rawValue),
-                mipLevel: 0, baseArrayLayer: 0, layerCount: 1
-            )
-            region.imageExtent = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
-            vkCmdCopyImageToBuffer(cmd, node.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.buffer, 1, &region)
-            engineImageBarrier(
-                cmd,
-                image:     node.image,
-                srcLayout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                srcAccess: VkAccessFlags(VK_ACCESS_TRANSFER_READ_BIT.rawValue),
-                srcStage:  VK_PIPELINE_STAGE_TRANSFER_BIT,
-                dstLayout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                dstAccess: VkAccessFlags(VK_ACCESS_SHADER_READ_BIT.rawValue),
-                dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-            )
-        }
-        return Array(UnsafeRawBufferPointer(start: readback.mapped, count: byteCount))
-    }
-
-    /// A host-visible, coherent buffer of `byteCount` bytes, mapped. The
-    /// caller unmaps and frees it.
-    func makeHostBuffer(
-        byteCount: Int,
-        usage:     VkBufferUsageFlagBits
-    ) -> (buffer: VkBuffer, memory: VkDeviceMemory, mapped: UnsafeMutableRawPointer)? {
-        var info = VkBufferCreateInfo()
-        info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO
-        info.size        = VkDeviceSize(byteCount)
-        info.usage       = VkBufferUsageFlags(usage.rawValue)
-        info.sharingMode = VK_SHARING_MODE_EXCLUSIVE
-        var buffer: VkBuffer?
-        guard vkCreateBuffer(device, &info, nil, &buffer) == VK_SUCCESS, let buffer else { return nil }
-
-        var requirements = VkMemoryRequirements()
-        vkGetBufferMemoryRequirements(device, buffer, &requirements)
-        var alloc = VkMemoryAllocateInfo()
-        alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
-        alloc.allocationSize = requirements.size
-        alloc.memoryTypeIndex = findMemoryType(
-            typeFilter: requirements.memoryTypeBits,
-            properties: VkMemoryPropertyFlags(
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT.rawValue | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT.rawValue
-            )
-        )
-        var memory: VkDeviceMemory?
-        guard vkAllocateMemory(device, &alloc, nil, &memory) == VK_SUCCESS, let memory else {
-            vkDestroyBuffer(device, buffer, nil)
-            return nil
-        }
-        vkBindBufferMemory(device, buffer, memory, 0)
-        var mapped: UnsafeMutableRawPointer?
-        guard vkMapMemory(device, memory, 0, VkDeviceSize(byteCount), 0, &mapped) == VK_SUCCESS, let mapped else {
-            vkFreeMemory(device, memory, nil)
-            vkDestroyBuffer(device, buffer, nil)
-            return nil
-        }
-        return (buffer, memory, mapped)
+        return readPixels(of: node.image, width: Int(node.width), height: Int(node.height))
     }
 }
 
@@ -448,22 +365,22 @@ extension ExternalTextureNode {
 
     /// The write path's command buffer, and its fence beside it — made on
     /// first use.
-    func writeCommandBuffer(engine: Engine) -> VkCommandBuffer? {
+    func writeCommandBuffer(device: Device) -> VkCommandBuffer? {
         if let writeCommandBuffer { return writeCommandBuffer }
         var cmd: VkCommandBuffer?
         var allocInfo = VkCommandBufferAllocateInfo()
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
-        allocInfo.commandPool = engine.commandPool
+        allocInfo.commandPool = device.commandPool
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY
         allocInfo.commandBufferCount = 1
-        guard vkAllocateCommandBuffers(engine.device, &allocInfo, &cmd) == VK_SUCCESS, let cmd else { return nil }
+        guard vkAllocateCommandBuffers(device.device, &allocInfo, &cmd) == VK_SUCCESS, let cmd else { return nil }
 
         var fenceInfo = VkFenceCreateInfo()
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
         var fence: VkFence?
-        guard vkCreateFence(engine.device, &fenceInfo, nil, &fence) == VK_SUCCESS, let fence else {
+        guard vkCreateFence(device.device, &fenceInfo, nil, &fence) == VK_SUCCESS, let fence else {
             var cmdOpt: VkCommandBuffer? = cmd
-            vkFreeCommandBuffers(engine.device, engine.commandPool, 1, &cmdOpt)
+            vkFreeCommandBuffers(device.device, device.commandPool, 1, &cmdOpt)
             return nil
         }
         writeCommandBuffer = cmd
@@ -472,23 +389,23 @@ extension ExternalTextureNode {
     }
 
     /// The staging buffer, grown to hold at least `byteCount` bytes.
-    func stagingBuffer(byteCount: Int, engine: Engine) -> (buffer: VkBuffer, mapped: UnsafeMutableRawPointer)? {
+    func stagingBuffer(byteCount: Int, device: Device) -> (buffer: VkBuffer, mapped: UnsafeMutableRawPointer)? {
         if let stagingBuffer, let stagingMapped, stagingSize >= byteCount {
             return (stagingBuffer, stagingMapped)
         }
         if let stagingMemory {
-            vkUnmapMemory(engine.device, stagingMemory)
-            vkFreeMemory(engine.device, stagingMemory, nil)
+            vkUnmapMemory(device.device, stagingMemory)
+            vkFreeMemory(device.device, stagingMemory, nil)
         }
         if let stagingBuffer {
-            vkDestroyBuffer(engine.device, stagingBuffer, nil)
+            vkDestroyBuffer(device.device, stagingBuffer, nil)
         }
         stagingBuffer = nil
         stagingMemory = nil
         stagingMapped = nil
         stagingSize = 0
-        guard let made = engine.makeHostBuffer(byteCount: byteCount, usage: VK_BUFFER_USAGE_TRANSFER_SRC_BIT) else {
-            print("VulkanRenderEngine: external texture staging buffer (\(byteCount) bytes) failed")
+        guard let made = device.makeHostBuffer(byteCount: byteCount, usage: VK_BUFFER_USAGE_TRANSFER_SRC_BIT) else {
+            print("VulkanRenderDevice: external texture staging buffer (\(byteCount) bytes) failed")
             return nil
         }
         stagingBuffer = made.buffer
@@ -505,7 +422,7 @@ extension ExternalTextureNode {
     /// Index into `importedSurfaces` of `surface`'s import, importing it
     /// first if it has not been seen. Moves it to the back: the list is kept
     /// in order of last use, and the front is what gets dropped.
-    func importedSurfaceIndex(_ surface: UnsafeMutableRawPointer, engine: Engine) -> Int? {
+    func importedSurfaceIndex(_ surface: UnsafeMutableRawPointer, device: Device) -> Int? {
         let ref = Unmanaged<IOSurfaceRef>.fromOpaque(surface).takeUnretainedValue()
         let width  = IOSurfaceGetWidth(ref)
         let height = IOSurfaceGetHeight(ref)
@@ -516,13 +433,13 @@ extension ExternalTextureNode {
                 return importedSurfaces.count - 1
             }
             // The same address, a different size: not the surface imported.
-            release(entry, engine: engine)
+            release(entry, device: device)
         }
-        guard let imported = importSurface(surface, width: width, height: height, engine: engine) else {
+        guard let imported = importSurface(surface, width: width, height: height, device: device) else {
             return nil
         }
         if importedSurfaces.count >= Self.importedSurfaceLimit {
-            release(importedSurfaces.removeFirst(), engine: engine)
+            release(importedSurfaces.removeFirst(), device: device)
         }
         importedSurfaces.append(imported)
         return importedSurfaces.count - 1
@@ -544,7 +461,7 @@ extension ExternalTextureNode {
         _ surface: UnsafeMutableRawPointer,
         width:     Int,
         height:    Int,
-        engine:    Engine
+        device:    Device
     ) -> ImportedSurface? {
         let importInfo = UnsafeMutableRawPointer.allocate(byteCount: 24, alignment: MemoryLayout<UInt>.alignment)
         defer { importInfo.deallocate() }
@@ -556,7 +473,7 @@ extension ExternalTextureNode {
         imageInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
         imageInfo.pNext         = UnsafeRawPointer(importInfo)
         imageInfo.imageType     = VK_IMAGE_TYPE_2D
-        imageInfo.format        = Engine.externalTextureFormat
+        imageInfo.format        = Device.externalTextureFormat
         imageInfo.extent        = VkExtent3D(width: UInt32(width), height: UInt32(height), depth: 1)
         imageInfo.mipLevels     = 1
         imageInfo.arrayLayers   = 1
@@ -566,29 +483,29 @@ extension ExternalTextureNode {
         imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED
         var image: VkImage?
-        guard vkCreateImage(engine.device, &imageInfo, nil, &image) == VK_SUCCESS, let image else {
-            print("VulkanRenderEngine: importing IOSurface \(width)x\(height) as a VkImage failed")
+        guard vkCreateImage(device.device, &imageInfo, nil, &image) == VK_SUCCESS, let image else {
+            print("VulkanRenderDevice: importing IOSurface \(width)x\(height) as a VkImage failed")
             return nil
         }
 
         // MoltenVK backs the image with the surface itself; the allocation
         // only satisfies Vulkan's bind-before-use rule.
         var requirements = VkMemoryRequirements()
-        vkGetImageMemoryRequirements(engine.device, image, &requirements)
+        vkGetImageMemoryRequirements(device.device, image, &requirements)
         var allocInfo = VkMemoryAllocateInfo()
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
         allocInfo.allocationSize = requirements.size
-        allocInfo.memoryTypeIndex = engine.findMemoryType(
+        allocInfo.memoryTypeIndex = device.findMemoryType(
             typeFilter: requirements.memoryTypeBits,
             properties: VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT.rawValue)
         )
         var memory: VkDeviceMemory?
-        guard vkAllocateMemory(engine.device, &allocInfo, nil, &memory) == VK_SUCCESS, let memory else {
-            vkDestroyImage(engine.device, image, nil)
-            print("VulkanRenderEngine: memory for imported IOSurface failed")
+        guard vkAllocateMemory(device.device, &allocInfo, nil, &memory) == VK_SUCCESS, let memory else {
+            vkDestroyImage(device.device, image, nil)
+            print("VulkanRenderDevice: memory for imported IOSurface failed")
             return nil
         }
-        vkBindImageMemory(engine.device, image, memory, 0)
+        vkBindImageMemory(device.device, image, memory, 0)
 
         _ = Unmanaged<IOSurfaceRef>.fromOpaque(surface).retain()
         return ImportedSurface(
@@ -604,17 +521,17 @@ extension ExternalTextureNode {
     /// Drop one import: its image and allocation, and its retain on the
     /// surface. Only ever called between writes, whose fence waits leave
     /// nothing on the GPU reading it.
-    private func release(_ entry: ImportedSurface, engine: Engine) {
-        vkDestroyImage(engine.device, entry.image, nil)
+    private func release(_ entry: ImportedSurface, device: Device) {
+        vkDestroyImage(device.device, entry.image, nil)
         if let memory = entry.memory {
-            vkFreeMemory(engine.device, memory, nil)
+            vkFreeMemory(device.device, memory, nil)
         }
         Unmanaged<IOSurfaceRef>.fromOpaque(entry.surface).release()
     }
 
-    func releaseImportedSurfaces(_ engine: Engine) {
+    func releaseImportedSurfaces(_ device: Device) {
         for entry in importedSurfaces {
-            release(entry, engine: engine)
+            release(entry, device: device)
         }
         importedSurfaces.removeAll()
     }

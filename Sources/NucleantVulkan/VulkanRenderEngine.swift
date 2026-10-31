@@ -54,18 +54,19 @@ public enum VulkanEngineError: Error {
 // MARK: - Engine
 
 /// One window's present stack: surface → swapchain → composite pass, on a
-/// `VulkanRenderDevice` (instance, device, queue) it does not own alone — on
-/// macOS every window's engine presents through the same one. Each frame it
-/// updates dirty nodes (ThorVG draw / compute dispatch + layout barriers) and
-/// blends every published node's image onto the swapchain with the
-/// alpha-blending `CompositePipeline`.
+/// `VulkanRenderDevice` (instance, device, queue) it may share with other
+/// windows — whoever builds the engines decides, by handing them the same
+/// device. Each frame the device updates dirty nodes (ThorVG draw / compute
+/// dispatch + layout barriers) and the engine blends every published node's
+/// image onto the swapchain with the alpha-blending `CompositePipeline`.
 public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanContext {
 
     // MARK: Device
 
-    /// The GPU this window renders with: `VulkanRenderDevice.shared` on
-    /// macOS; elsewhere still one per window, made from its own instance.
-    public let renderDevice: VulkanRenderDevice
+    /// The GPU this window renders with — handed in by whoever builds the
+    /// engine (`init(device:…)`), or made for this window alone by the inits
+    /// that take no device.
+    public let renderDevice: VulkanRenderDevice<RenderNode>
 
     // MARK: VulkanContext
 
@@ -97,28 +98,27 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     // MARK: Nodes
 
     /// The slots composited each frame, in array order (later = on top).
+    ///
+    /// The list shows nodes; it doesn't own them. A node is the device's —
+    /// the same one may sit in several windows' lists, or in none — so
+    /// nothing here frees one: whoever made it calls `destroyResources`,
+    /// whose frees wait for every frame still sampling it.
     public var nodes: [RenderNode] = []
 
     public func append(_ node: RenderNode) {
         nodes.append(node)
     }
 
-    /// Removes a single node from the composite list — e.g. when the widget
+    /// Takes a single node out of the composite list — e.g. when the widget
     /// owning it is dropped from the tree, so a stale image doesn't keep
     /// drawing every frame. Keyed by the slot's stable id (the owning
-    /// canvas's `id`, the same value it was appended with). Groups aren't
-    /// addressed by this (nothing builds one yet).
+    /// canvas's `id`, the same value it was appended with). The node itself
+    /// stays alive for its owner to free. Groups aren't addressed by this
+    /// (nothing builds one yet).
     public func remove(id: Int) {
         // let id = ObjectIdentifier(node).hashValue
         // ^ replaced (update-render-system.md): identity is the canvas-owned
         //   Int id carried by RenderNode, never derived from the node object.
-        // Free the outgoing slot's GPU resources before it leaves the list —
-        // the slot routes to its node's destroyResources. Without this every
-        // removal (widget detach, resize) strands the node's VkImage on the
-        // device, the exact leak that used to need a separate engine call.
-        if let node = nodes.first(where: { $0.id == id }) {
-            node.destroyResources(engine: self)
-        }
         nodes.removeAll { $0.id == id }
         releaseTracking(of: id)
     }
@@ -126,16 +126,13 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// Swap a slot's context in place — same id, same z-position, new GPU
     /// resources. `remove` + `append` would hoist a rebuilt node above
     /// every sibling; a frame resize must not change stacking order.
-    /// Falls back to append when the id isn't listed.
+    /// Falls back to append when the id isn't listed. The outgoing node is
+    /// its owner's to free, as with `remove`.
     public func replace(id: Int, with context: RenderNode.Context) {
         // let id = ObjectIdentifier(old).hashValue
         // ^ replaced, same as remove(id:) — see note there.
         releaseTracking(of: id)
         if let index = nodes.firstIndex(where: { $0.id == id }) {
-            // Same-id swap (resize): the caller has already built the
-            // replacement (it's in `context`), so the outgoing node's image
-            // is now orphaned — free it before installing the new slot.
-            nodes[index].destroyResources(engine: self)
             nodes[index] = .new(id: id, context: context)
         } else {
             nodes.append(.new(id: id, context: context))
@@ -148,69 +145,26 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         nodes.first { $0.id == id }
     }
 
-    /// Drop everything the engine caches against a slot id whose node image was
-    /// swapped *in place* (a resize) — the sampler descriptor set + its pool,
-    /// and the `readable` flag. The per-slot descriptor cache assumes a node's
-    /// imageView is stable for life; an in-place image swap breaks that, so the
-    /// next frame must rebuild the set from the new view, and the slot must not
-    /// be sampled until the resized node's next draw makes its new image
-    /// readable again. Unlike `remove`/`replace`, the node itself stays in the
+    /// Drop everything cached against a slot id whose node image was swapped
+    /// *in place* (a resize): this window's sampler descriptor set + its
+    /// pool, and the device's `readable` flag — the slot must not be sampled,
+    /// in any window, until the resized node's next update publishes its new
+    /// image. Unlike `remove`/`replace`, the node itself stays in the
     /// composite list — this only clears cache, never the slot.
     public func invalidateComposite(id: Int) {
         releaseTracking(of: id)
+        renderDevice.readable.remove(id)
     }
 
-    /// Run `release` once every frame submitted so far has finished on the
-    /// GPU: for what a resize just swapped out of a node — its old image,
-    /// view, memory — which a frame still in flight may be sampling. Never
-    /// blocks, unlike `vkDeviceWaitIdle`: the frames it waits on are checked
-    /// as later frames begin, and it runs at the first that finds them done.
-    public func releaseAfterInFlightFrames(_ release: @escaping () -> Void) {
-        pendingReleases.append((after: submittedFrames, release: release))
-    }
-
-    /// Run the releases whose frames the GPU has finished. Each slot's fence,
-    /// once signalled, says the frame it last carried is done.
-    private func runFinishedReleases() {
-        guard !pendingReleases.isEmpty else { return }
-        for slot in inFlight.indices where vkGetFenceStatus(device, inFlight[slot]) == VK_SUCCESS {
-            completedFrames = Swift.max(completedFrames, slotFrames[slot])
-        }
-        let completed = completedFrames
-        guard pendingReleases.contains(where: { $0.after <= completed }) else { return }
-        var waiting: [(after: UInt64, release: () -> Void)] = []
-        for pending in pendingReleases {
-            if pending.after <= completed {
-                pending.release()
-            } else {
-                waiting.append(pending)
-            }
-        }
-        pendingReleases = waiting
-    }
-
-    /// Everything the engine tracked against a slot id — descriptor set +
-    /// its dedicated pool, readable state, warn-once marker. Shared by
-    /// `remove(id:)` / `replace(id:with:)`; the next frame re-derives it
-    /// all for whatever occupies the id afterwards.
+    /// This window's descriptor set for a slot id, and its dedicated pool.
+    /// The next frame re-derives it for whatever occupies the id afterwards.
     private func releaseTracking(of id: Int) {
-        nodeSets.removeValue(forKey: id)
+        guard let cached = nodeSets.removeValue(forKey: id) else { return }
         // A frame still in flight may be binding the set — the pool goes
         // once those frames are done.
-        if let pool = nodeDescriptorPools.removeValue(forKey: id) {
-            let device = device
-            releaseAfterInFlightFrames { vkDestroyDescriptorPool(device, pool, nil) }
-        }
-        readable.remove(id)
-        warnedFailedNodes.remove(id)
+        let device = device
+        renderDevice.releaseAfterInFlightWork { vkDestroyDescriptorPool(device, cached.pool, nil) }
     }
-
-    // GPU-side teardown of a node's VkImage/view/memory lives on the node
-    // now, not here: `VulkanRenderNode.destroyResources(_:)`, called through
-    // the slot's `destroyResources(engine:)`. That keeps node-kind-specific
-    // teardown (a CPU-fed node's staging buffer, a Skia node's surface) out
-    // of the generic engine — the engine only takes the slot out of the
-    // composite list via `remove(id:)`.
 
     /// Called at the start of every frame with Δt — mutate nodes / set `dirty`
     /// here to drive animation.
@@ -258,32 +212,14 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     private var renderFinished: [VkSemaphore?]     = []
     private var inFlight:       [VkFence?]         = []
 
-    /// Frames submitted so far, the frame each in-flight slot last carried,
-    /// and the newest one known to have finished on the GPU — what
-    /// `releaseAfterInFlightFrames` counts against.
-    private var submittedFrames: UInt64 = 0
-    private var slotFrames: [UInt64] = []
-    private var completedFrames: UInt64 = 0
-    private var pendingReleases: [(after: UInt64, release: () -> Void)] = []
-
-    /// Descriptor set per node (keyed by identity) — image views are stable
-    /// for a node's lifetime, so one set-update at creation is enough. Each
-    /// set gets its own dedicated pool (see `allocateNodeDescriptorSet`) so
-    /// MoltenVK never has to pack multiple same-layout sets from one pool —
-    /// doing so misaligns every other set's Metal argument-buffer offset.
-    private var nodeSets: [Int: VkDescriptorSet] = [:]
-    private var nodeDescriptorPools: [Int: VkDescriptorPool] = [:]
-    /// Nodes whose image currently sits in SHADER_READ_ONLY_OPTIMAL.
-    /// Internal (not private): the Skia update lives in its own file
-    /// (VulkanRenderEngine+Skia.swift) and publishes through this too.
-    public var readable: Set<Int> = []
-    /// Nodes we've already logged a draw failure for — ThorVG's Canvas
-    /// legitimately (and permanently) returns InsufficientCondition from a
-    /// canvas nothing was ever painted into (e.g. a container widget whose
-    /// on_canvas only holds children), so this is expected steady-state for
-    /// some nodes, not a transient error worth repeating every frame.
-    /// Internal for the same reason as `readable`.
-    public var warnedFailedNodes: Set<Int> = []
+    /// This window's descriptor set per slot id, with the image view it was
+    /// written for and its own pool. A node's view can change under it — a
+    /// resize on the device, which knows nothing of this window — so a set
+    /// whose view no longer matches the node's is rebuilt. Each set gets its
+    /// own dedicated pool (see `allocateNodeDescriptorSet`) so MoltenVK never
+    /// has to pack multiple same-layout sets from one pool — doing so
+    /// misaligns every other set's Metal argument-buffer offset.
+    private var nodeSets: [Int: (set: VkDescriptorSet, view: VkImageView, pool: VkDescriptorPool)] = [:]
 
     // MARK: - Init
 
@@ -300,7 +236,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     /// `drawableSize`; a raw Wayland surface doesn't self-report at all), so
     /// whoever made the surface answers it too.
     public init(
-        device renderDevice: VulkanRenderDevice,
+        device renderDevice: VulkanRenderDevice<RenderNode>,
         surface: VkSurfaceKHR,
         getExtent: @escaping () -> VkExtent2D
     ) throws {
@@ -328,42 +264,46 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     }
 
     /// A window with a device of its own, made from `instance` on a queue
-    /// family that presents to `surface` — what every platform but macOS
-    /// still builds. The device owns `instance` from here on.
+    /// family that presents to `surface` — the engine as it was before the
+    /// device was split out. The device owns `instance` from here on.
     public convenience init(
         instance: VkInstance,
         surface: VkSurfaceKHR,
         getExtent: @escaping () -> VkExtent2D
     ) throws {
-        let renderDevice = try VulkanRenderDevice(instance: instance, presentingTo: surface)
+        let renderDevice = try VulkanRenderDevice<RenderNode>(instance: instance, presentingTo: surface)
         try self.init(device: renderDevice, surface: surface, getExtent: getExtent)
     }
 
     #if os(macOS) || os(iOS)
-    /// Apple entry point: the VkSurfaceKHR from a CAMetalLayer, since Apple
-    /// only allows reaching Vulkan through MoltenVK/Metal in the first place
-    /// — there's no "hand me a native surface" option here the way there is
-    /// on Linux. On macOS the surface is made on `VulkanRenderDevice.shared`,
-    /// so every window presents through the one device; iOS still makes a
-    /// device per window, from an instance of its own. Delegates to the
-    /// shared init above for everything past that.
+    /// Apple entry point: the VkSurfaceKHR from a CAMetalLayer, made on
+    /// `device` — a device made with `VulkanRenderDevice()`, which the caller
+    /// holds and may hand to every window it opens. Apple only allows reaching
+    /// Vulkan through MoltenVK/Metal in the first place, so there's no "hand
+    /// me a native surface" option here the way there is on Linux. Delegates
+    /// to the shared init above for everything past that.
+    public convenience init(device renderDevice: VulkanRenderDevice<RenderNode>, metalLayer: CAMetalLayer) throws {
+        let surface = try Self.makeMetalSurface(instance: renderDevice.instance, layer: metalLayer)
+        try self.init(device: renderDevice, surface: surface, getExtent: Self.drawableExtent(of: metalLayer))
+    }
+
+    /// A window with a device of its own, made on a Metal instance of its
+    /// own — the engine as it was before the device was split out.
     public convenience init(metalLayer: CAMetalLayer) throws {
-        let getExtent = {
+        let instance = try VulkanRenderDevice<RenderNode>.makeMetalInstance()
+        let surface = try Self.makeMetalSurface(instance: instance, layer: metalLayer)
+        try self.init(instance: instance, surface: surface, getExtent: Self.drawableExtent(of: metalLayer))
+    }
+
+    /// The layer's drawable size, asked fresh each time.
+    private static func drawableExtent(of metalLayer: CAMetalLayer) -> () -> VkExtent2D {
+        {
             let drawable = metalLayer.drawableSize
             return VkExtent2D(
                 width:  UInt32(max(drawable.width, 0)),
                 height: UInt32(max(drawable.height, 0))
             )
         }
-        #if os(macOS)
-        let renderDevice = try VulkanRenderDevice.shared
-        let surface = try Self.makeMetalSurface(instance: renderDevice.instance, layer: metalLayer)
-        try self.init(device: renderDevice, surface: surface, getExtent: getExtent)
-        #else
-        let instance = try VulkanRenderDevice.makeMetalInstance()
-        let surface = try Self.makeMetalSurface(instance: instance, layer: metalLayer)
-        try self.init(instance: instance, surface: surface, getExtent: getExtent)
-        #endif
     }
 
     /// `vkCreateMetalSurfaceEXT` for `layer`, on `instance`.
@@ -555,20 +495,20 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // This window's frames, not the device: other windows on it keep
         // rendering while this one goes.
         waitForInFlightFrames()
-        for pending in pendingReleases { pending.release() }
-        pendingReleases.removeAll()
-        // Free every live slot's node resources before the window's objects
-        // go — each routes to its node's destroyResources. A shared device
-        // outlives this engine, so nothing reclaims them later.
-        for node in nodes { node.destroyResources(engine: self) }
+        // The nodes are the device's, not this window's: they stay for their
+        // owners, and for any other window showing them.
         nodes.removeAll()
-        for pool in nodeDescriptorPools.values { vkDestroyDescriptorPool(device, pool, nil) }
+        for cached in nodeSets.values { vkDestroyDescriptorPool(device, cached.pool, nil) }
         composite = nil   // destroys its pipeline/layouts
         destroySwapchainObjects()
         if let swapchain { vkDestroySwapchainKHR(device, swapchain, nil) }
         for sem in imageAvailable where sem != nil { vkDestroySemaphore(device, sem, nil) }
         for sem in renderFinished where sem != nil { vkDestroySemaphore(device, sem, nil) }
-        for fence in inFlight where fence != nil { vkDestroyFence(device, fence, nil) }
+        for fence in inFlight {
+            guard let fence else { continue }
+            renderDevice.didWait(on: fence)
+            vkDestroyFence(device, fence, nil)
+        }
         // Allocated from the device's pool, which stays.
         if !commandBuffers.isEmpty {
             vkFreeCommandBuffers(device, commandPool, UInt32(commandBuffers.count), commandBuffers)
@@ -615,7 +555,6 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         let frame = frameIndex
         var fence = inFlight[frame]
         vkWaitForFences(device, 1, &fence, VK_TRUE, UInt64.max)
-        runFinishedReleases()
 
         var imageIndex: UInt32 = 0
         let acquire = vkAcquireNextImageKHR(
@@ -632,18 +571,18 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         }
         guard acquire == VK_SUCCESS || acquire == VK_SUBOPTIMAL_KHR else { return }
 
-        guard let cmd = commandBuffers[frame] else { return }
+        guard let cmd = commandBuffers[frame], let frameFence = fence else { return }
+
+        // 1. Node content updates — device work, in the device's own command
+        //    buffer, submitted ahead of this frame on the same queue. Queue
+        //    order and the nodes' barriers make the composite below see it.
+        renderDevice.render(nodes)
+
         vkResetCommandBuffer(cmd, 0)
         var begin = VkCommandBufferBeginInfo()
         begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         begin.flags = VkCommandBufferUsageFlags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT.rawValue)
         vkBeginCommandBuffer(cmd, &begin)
-
-        // 1. Node content updates (outside the render pass).
-        for node in nodes {
-            //update(node, cmd: cmd)
-            node.update(engine: self, cmd: cmd)
-        }
 
         // 2. Composite every published node onto the swapchain image.
         recordCompositePass(cmd: cmd, imageIndex: Int(imageIndex))
@@ -654,9 +593,13 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         //    submit that signals it again: a frame that bailed out earlier
         //    leaves it signalled, so waiting on it never hangs.
         vkResetFences(device, 1, &fence)
-        guard submit(cmd, frame: frame) == VK_SUCCESS else { return }
-        submittedFrames += 1
-        slotFrames[frame] = submittedFrames
+        guard renderDevice.submit(
+            cmd,
+            waitSemaphore:   imageAvailable[frame],
+            waitStage:       VkPipelineStageFlags(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT.rawValue),
+            signalSemaphore: renderFinished[frame],
+            fence:           frameFence
+        ) == VK_SUCCESS else { return }
         let present = presentFrame(imageIndex: imageIndex, frame: frame)
         if present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR {
             recreateSwapchain()
@@ -735,9 +678,9 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         )
     }
 
-    /// Composite one slot, recursing into groups. A slot only draws once a
-    /// frame update actually published its image (`readable`) — a node that
-    /// never rendered has nothing safe to sample.
+    /// Composite one slot, recursing into groups. A slot only draws once an
+    /// update actually published its image (the device's `readable`) — a
+    /// node that never rendered has nothing safe to sample.
     private func recordComposite(
         of node:  RenderNode,
         cmd:      VkCommandBuffer,
@@ -764,7 +707,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // }
         guard
             let imageView = node.getImageView(),
-            readable.contains(node.id),
+            renderDevice.readable.contains(node.id),
             let set = descriptorSet(id: node.id, imageView: imageView)
         else { return }
         
@@ -780,40 +723,18 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
     public func descriptorSet(id: Int, imageView: VkImageView) -> VkDescriptorSet? {
         // let id = ObjectIdentifier(node).hashValue
         // ^ replaced — RenderNode.id is the one identity both sides share.
-        if let set = nodeSets[id] { return set }
+        if let cached = nodeSets[id] {
+            if cached.view == imageView { return cached.set }
+            // Swapped on the device since this window wrote the set.
+            releaseTracking(of: id)
+        }
         guard let allocated = try? composite.allocateNodeDescriptorSet() else { return nil }
         composite.updateDescriptorSet(allocated.set, imageViews: [imageView])
-        nodeSets[id] = allocated.set
-        nodeDescriptorPools[id] = allocated.pool
+        nodeSets[id] = (set: allocated.set, view: imageView, pool: allocated.pool)
         return allocated.set
     }
 
     // MARK: - Submit / present
-
-    private func submit(_ cmd: VkCommandBuffer, frame: Int) -> VkResult {
-        var waitStage = VkPipelineStageFlags(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT.rawValue)
-        var waitSem   = imageAvailable[frame]
-        var signalSem = renderFinished[frame]
-        var cmdOpt: VkCommandBuffer? = cmd
-        return withUnsafePointer(to: &waitStage) { stagePtr in
-            withUnsafePointer(to: &waitSem) { waitPtr in
-                withUnsafePointer(to: &signalSem) { signalPtr in
-                    withUnsafePointer(to: &cmdOpt) { cmdPtr in
-                        var info = VkSubmitInfo()
-                        info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO
-                        info.waitSemaphoreCount = 1
-                        info.pWaitSemaphores = waitPtr
-                        info.pWaitDstStageMask = stagePtr
-                        info.commandBufferCount = 1
-                        info.pCommandBuffers = cmdPtr
-                        info.signalSemaphoreCount = 1
-                        info.pSignalSemaphores = signalPtr
-                        return vkQueueSubmit(graphicsQueue, 1, &info, inFlight[frame])
-                    }
-                }
-            }
-        }
-    }
 
     private func presentFrame(imageIndex: UInt32, frame: Int) -> VkResult {
         var waitSem = renderFinished[frame]
@@ -955,7 +876,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         // extent in place) — neither should touch node content.
         guard extent.width != oldWidth || extent.height != oldHeight else { return }
         for node in nodes {
-            node.resizeToFitWindow(width: Int(extent.width), height: Int(extent.height), engine: self)
+            node.resizeToFitWindow(width: Int(extent.width), height: Int(extent.height), device: renderDevice)
         }
     }
 
@@ -1123,7 +1044,6 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
                 throw VulkanEngineError.sync
             }
             inFlight.append(fence)
-            slotFrames.append(0)
         }
     }
 }
@@ -1202,36 +1122,6 @@ extension VulkanRenderEngine {
         guard !inFlight.isEmpty else { return }
         var fence = inFlight[(frameIndex + Self.maxFrames - 1) % Self.maxFrames]
         vkWaitForFences(device, 1, &fence, VK_TRUE, UInt64.max)
-    }
-
-    /// Record + submit a transient command buffer and block until done.
-    public func oneTimeSubmit(_ body: (VkCommandBuffer) -> Void) {
-        var cmd: VkCommandBuffer?
-        var allocInfo = VkCommandBufferAllocateInfo()
-        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO
-        allocInfo.commandPool = commandPool
-        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY
-        allocInfo.commandBufferCount = 1
-        vkAllocateCommandBuffers(device, &allocInfo, &cmd)
-        guard let cmd else { return }
-
-        var begin = VkCommandBufferBeginInfo()
-        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-        begin.flags = VkCommandBufferUsageFlags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT.rawValue)
-        vkBeginCommandBuffer(cmd, &begin)
-        body(cmd)
-        vkEndCommandBuffer(cmd)
-
-        var cmdOpt: VkCommandBuffer? = cmd
-        withUnsafePointer(to: &cmdOpt) { cmdPtr in
-            var submitInfo = VkSubmitInfo()
-            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO
-            submitInfo.commandBufferCount = 1
-            submitInfo.pCommandBuffers = cmdPtr
-            vkQueueSubmit(graphicsQueue, 1, &submitInfo, nil)
-        }
-        vkQueueWaitIdle(graphicsQueue)
-        vkFreeCommandBuffers(device, commandPool, 1, &cmdOpt)
     }
 }
 

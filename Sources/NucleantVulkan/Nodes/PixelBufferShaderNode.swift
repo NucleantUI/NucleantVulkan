@@ -17,16 +17,17 @@ import Observation
 /// `RenderNode` slot tracks `dirty` / the compute trio, so a `write`
 /// or a pipeline swap re-renders on its own.
 ///
-/// Threading contract: `write` and the engine's frame loop must share a
+/// Threading contract: `write` and the device's renders must share a
 /// thread (everything runs on main today). `write` only touches the
 /// CPU-side backing store — the copy into the staging slice happens at
-/// record time, after the frame fence proved the GPU is done with that
+/// record time, after the render's fence proved the GPU is done with that
 /// slice, so the producer can never scribble over pixels the GPU is
 /// still reading.
 @Observable
 public final class PixelBufferShaderNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
     
-    public typealias Engine = VulkanRenderEngine<ContainerNode>
+    public typealias Device = VulkanRenderDevice<ContainerNode>
+    
     
     
     /// Size of `image` — the surface shaders and the composite see.
@@ -152,8 +153,8 @@ public final class PixelBufferShaderNode<ContainerNode: RenderContainerNode>: Vu
         (slice % stagingSliceCount) * bytesPerFrame
     }
     
-    /// Copy the CPU backing store into a staging slice. Only the engine
-    /// calls this, after the slice's frame fence signalled — that fence
+    /// Copy the CPU backing store into a staging slice. Only the update
+    /// calls this, after the slice's render fence signalled — that fence
     /// is the proof no in-flight copy still reads these bytes.
     func stage(into slice: Int) {
         pixels.withUnsafeBytes { source in
@@ -171,13 +172,13 @@ extension PixelBufferShaderNode {
     /// shader — same barrier choreography, TRANSFER standing in for the
     /// canvas draw. Without a first `write` the node has no content and
     /// stays unpublished.
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         guard slot.needsRender, hasContent else { return }
 
-        // This frame slot's fence was waited at the top of drawFrame — the
-        // staging slice indexed by it is provably idle, so the CPU copy
-        // here can't race the previous frame's GPU read.
-        stage(into: engine.frameIndex)
+        // This render slot's fence was waited at the top of the device's
+        // render — the staging slice indexed by it is provably idle, so the
+        // CPU copy here can't race the previous render's GPU read.
+        stage(into: device.frameIndex)
 
         // First upload ever: the image is still UNDEFINED and fully
         // overwritten by the copy, so discarding is correct. Afterwards
@@ -201,7 +202,7 @@ extension PixelBufferShaderNode {
             layerCount:     1
         )
         var region = VkBufferImageCopy()
-        region.bufferOffset = VkDeviceSize(stagingOffset(of: engine.frameIndex))
+        region.bufferOffset = VkDeviceSize(stagingOffset(of: device.frameIndex))
         // bufferRowLength/bufferImageHeight 0 = tightly packed.
         region.imageSubresource = colorLayers
         region.imageExtent = VkExtent3D(width: sourceWidth, height: sourceHeight, depth: 1)
@@ -310,31 +311,36 @@ extension PixelBufferShaderNode {
             )
         }
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        engine.readable.insert(slot.id)
+        device.readable.insert(slot.id)
         // slot.needsRender deliberately not cleared — same steady-state as
         // the other node updates until the producer side drives updates
         // through the Observation chain.
     }
 
-    /// Free everything this node owns after draining the device: the
-    /// persistently-mapped staging buffer (unmapped before its free), the
-    /// image/view/memory, and — when scaling — the source-sized upload
-    /// image and its memory.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        vkUnmapMemory(engine.device, stagingMemory)
-        vkDestroyBuffer(engine.device, stagingBuffer, nil)
-        vkFreeMemory(engine.device, stagingMemory, nil)
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
-        }
-        if let uploadImage {
-            vkDestroyImage(engine.device, uploadImage, nil)
-        }
-        if let uploadMemory {
-            vkFreeMemory(engine.device, uploadMemory, nil)
+    /// Free everything this node owns, once no render or frame in flight —
+    /// in any window — still uses it: the persistently-mapped staging
+    /// buffer (unmapped before its free), the image/view/memory, and — when
+    /// scaling — the source-sized upload image and its memory.
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let stagingMemory = stagingMemory, stagingBuffer = stagingBuffer
+        let imageView = imageView, image = image, memory = memory
+        let uploadImage = uploadImage, uploadMemory = uploadMemory
+        device.releaseAfterInFlightWork {
+            vkUnmapMemory(vkDevice, stagingMemory)
+            vkDestroyBuffer(vkDevice, stagingBuffer, nil)
+            vkFreeMemory(vkDevice, stagingMemory, nil)
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
+            if let uploadImage {
+                vkDestroyImage(vkDevice, uploadImage, nil)
+            }
+            if let uploadMemory {
+                vkFreeMemory(vkDevice, uploadMemory, nil)
+            }
         }
     }
 }

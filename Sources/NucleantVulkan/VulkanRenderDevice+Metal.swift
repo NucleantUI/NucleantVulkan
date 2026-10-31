@@ -2,13 +2,21 @@
 //  VulkanRenderDevice+Metal.swift
 //  NucleantVulkan
 //
-//  Apple: the instance MoltenVK surfaces are made from, and on macOS the
-//  process's one device, made without a window.
+//  Apple: the instance MoltenVK surfaces are made from, and a device on it
+//  made without a window.
 //
 #if os(macOS) || os(iOS)
 import CVulkan
 
 extension VulkanRenderDevice {
+
+    /// A device on MoltenVK, made with no window: every engine made with it
+    /// (`VulkanRenderEngine(device:metalLayer:)`) presents through it, so
+    /// nodes made on it can be composited into any of their windows — and
+    /// rendered before the first window and after the last.
+    public convenience init() throws {
+        try self.init(instance: Self.makeMetalInstance())
+    }
 
     /// The VkInstance a `CAMetalLayer` surface can be made from: the Metal
     /// surface extensions, plus MoltenVK's configuration
@@ -99,21 +107,5 @@ extension VulkanRenderDevice {
     }
 }
 
-#if os(macOS)
-extension VulkanRenderDevice {
-
-    /// Made once, the first time anything asks — a window or not. A failure
-    /// is kept too: asking again gets the same error, not a second attempt.
-    private static let sharedDevice = Result {
-        try VulkanRenderDevice(instance: makeMetalInstance())
-    }
-
-    /// The process's device. Every engine made from a `CAMetalLayer`
-    /// presents through it, so nodes made on it can be composited into any
-    /// window — and it exists before the first window and after the last.
-    public static var shared: VulkanRenderDevice {
-        get throws { try sharedDevice.get() }
-    }
-}
 #endif
-#endif
+

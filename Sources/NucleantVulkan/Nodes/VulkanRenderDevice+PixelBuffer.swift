@@ -1,8 +1,8 @@
 //
-//  VulkanRenderEngine+PixelBuffer.swift
+//  VulkanRenderDevice+PixelBuffer.swift
 //  NucleantVulkan
 //
-//  The CPU-fed node factory: an engine-owned RGBA8 image plus a
+//  The CPU-fed node factory: an RGBA8 image on the device plus a
 //  persistently-mapped staging buffer. Generic (no backend library), so it
 //  lives in the engine core alongside `PixelBufferShaderNode` itself.
 //
@@ -10,15 +10,16 @@ import VulkanCore
 import CVulkan
 
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
-    /// Build a CPU-fed upload node: an engine-owned RGBA8 image (TRANSFER_DST
-    /// + SAMPLED + STORAGE) and a persistently-mapped host-visible staging
-    /// buffer with one slice per frame-in-flight. The image starts UNDEFINED —
+    /// Build a CPU-fed upload node: an RGBA8 image on the device
+    /// (TRANSFER_DST + SAMPLED + STORAGE, + TRANSFER_SRC for `readPixels`)
+    /// and a persistently-mapped host-visible staging buffer with one slice
+    /// per device frame-in-flight (`frameIndex`). The image starts UNDEFINED —
     /// the node's first `write` overwrites every texel, and until that first
-    /// write the engine keeps it out of the composite entirely. The engine
-    /// does not own the resources — `destroyResources(_:)` frees them when the
-    /// node is dropped. Callers append the returned node themselves.
+    /// write no window composites it. The device does not own the resources
+    /// — `destroyResources(_:)` frees them when the node is dropped. Callers
+    /// append the returned node to whichever windows show it.
     ///
     /// `scale` > 1 sizes the node's image at width/height × scale while the
     /// producer keeps writing source-sized frames: the upload lands in an
@@ -41,6 +42,7 @@ extension VulkanRenderEngine {
         imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL
         imageInfo.usage         = VkImageUsageFlags(
             VK_IMAGE_USAGE_TRANSFER_DST_BIT.rawValue |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT.rawValue |
             VK_IMAGE_USAGE_SAMPLED_BIT.rawValue |
             VK_IMAGE_USAGE_STORAGE_BIT.rawValue
         )

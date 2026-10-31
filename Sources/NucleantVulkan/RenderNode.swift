@@ -36,7 +36,9 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     var compositeScissor: SIMD4<Double>? { get }
     
     
-    func update(engine: Engine, cmd: VkCommandBuffer)
+    /// The slot's node work, recorded by `VulkanRenderDevice.render` — with
+    /// a window, ahead of its composite; without one, on its own.
+    func update(device: Device, cmd: VkCommandBuffer)
     
     // recordComposite lives on the engine, not here: sampling a node's
     // published image onto the swapchain is identical for every node kind
@@ -44,7 +46,9 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     // VulkanRenderEngine.recordComposite(of:). Per-node work that actually
     // differs (canvas draw + layout barriers) is what `update` carries.
     
-    func destroyResources(engine: Engine)
+    /// Free the slot's node. Never called by a window: the node is the
+    /// device's, and outlives any composite list it sits in.
+    func destroyResources(device: Device)
     
     func getImageView() -> VkImageView?
     
@@ -55,7 +59,7 @@ public protocol RenderContainerNode: AnyObject, Identifiable, Observable, Sendab
     /// instead of staying at whatever size it was last bound at. A no-op for
     /// node kinds with nothing size-bound to resize, and for any node that
     /// does carry a `compositeRect` (its own frame already governs its size).
-    func resizeToFitWindow(width: Int, height: Int, engine: Engine)
+    func resizeToFitWindow(width: Int, height: Int, device: Device)
 }
 
 extension RenderContainerNode {
@@ -67,9 +71,10 @@ extension RenderContainerNode {
     /// this, so existing node types are unaffected.
     public var compositeScissor: SIMD4<Double>? { nil }
     
-    public func resizeToFitWindow(width: Int, height: Int, engine: Engine) {}
+    public func resizeToFitWindow(width: Int, height: Int, device: Device) {}
     
     public typealias Engine = VulkanRenderEngine<Self>
+    public typealias Device = VulkanRenderDevice<Self>
     /// Arm one observation over the node's render-affecting state. A
     /// registration fires exactly once, so `onChange` re-arms; `node` is
     /// captured weakly because the node's registrar holds this closure —

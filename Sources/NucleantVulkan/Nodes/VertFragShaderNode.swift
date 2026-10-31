@@ -22,7 +22,7 @@ import VulkanCore
 @Observable
 public final class VertFragShaderNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
 
-    public typealias Engine = VulkanRenderEngine<ContainerNode>
+    public typealias Device = VulkanRenderDevice<ContainerNode>
 
     public var width:  UInt32
     public var height: UInt32
@@ -93,7 +93,7 @@ extension VertFragShaderNode {
     /// previous frame's sampling, so there is no barrier to record here.
     /// Without an installed pipeline the node has no content and stays
     /// unpublished, as `OGLShaderNode` does.
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         guard slot.needsRender else { return }
         guard let pipeline, let pipelineLayout, let descriptorSet, let framebuffer else { return }
 
@@ -105,22 +105,26 @@ extension VertFragShaderNode {
         vkCmdEndRenderPass(cmd)
 
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        engine.readable.insert(slot.id)
+        device.readable.insert(slot.id)
     }
 
-    /// Free the framebuffer, image, view and memory this node owns. The
-    /// render pass is shared and outlives the node; the pipeline objects are
-    /// the builder's.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        if let framebuffer {
-            vkDestroyFramebuffer(engine.device, framebuffer, nil)
-            self.framebuffer = nil
-        }
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
+    /// Free the framebuffer, image, view and memory this node owns, once no
+    /// frame in flight — in any window — still samples it. The render pass
+    /// is shared and outlives the node; the pipeline objects are the
+    /// builder's.
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let framebuffer = framebuffer, imageView = imageView, image = image, memory = memory
+        self.framebuffer = nil
+        device.releaseAfterInFlightWork {
+            if let framebuffer {
+                vkDestroyFramebuffer(vkDevice, framebuffer, nil)
+            }
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
         }
     }
 }

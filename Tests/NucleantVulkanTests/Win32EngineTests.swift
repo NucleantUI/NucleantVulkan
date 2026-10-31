@@ -36,12 +36,12 @@ final class Win32TestSlot: RenderContainerNode, @unchecked Sendable {
         if case .texture(let node) = context { observe(node) }
     }
 
-    func update(engine: Engine, cmd: VkCommandBuffer) {
-        if case .texture(let node) = context { node.update(engine, slot: self, cmd: cmd) }
+    func update(device: Device, cmd: VkCommandBuffer) {
+        if case .texture(let node) = context { node.update(device, slot: self, cmd: cmd) }
     }
 
-    func destroyResources(engine: Engine) {
-        if case .texture(let node) = context { node.destroyResources(engine) }
+    func destroyResources(device: Device) {
+        if case .texture(let node) = context { node.destroyResources(device) }
     }
 
     func getImageView() -> VkImageView? {
@@ -101,9 +101,9 @@ private final class TestWindow {
                 let blue = UInt8(i * 16), green = UInt8(255 - i * 16), red = UInt8(i * 7)
                 pixels += [blue, green, red, 255]
             }
-            let node = try engine.makeExternalTextureNode(width: width, height: height)
+            let node = try engine.renderDevice.makeExternalTextureNode(width: width, height: height)
             let written = pixels.withUnsafeBytes { bytes in
-                engine.writeExternalTexture(node, bgra: bytes.baseAddress!, width: width, height: height,
+                engine.renderDevice.writeExternalTexture(node, bgra: bytes.baseAddress!, width: width, height: height,
                                             bytesPerRow: width * 4)
             }
             #expect(written)
@@ -113,9 +113,9 @@ private final class TestWindow {
                 engine.drawFrame(1.0 / 60.0)
             }
             // The frame published the node to the composite...
-            #expect(engine.readable.contains(1))
+            #expect(engine.renderDevice.readable.contains(1))
             // ...and its pixels are the ones written, through the GPU.
-            #expect(engine.readExternalTexture(node) == pixels)
+            #expect(engine.renderDevice.readExternalTexture(node) == pixels)
         }
     }
 }
