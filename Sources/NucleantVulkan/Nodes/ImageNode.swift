@@ -10,8 +10,9 @@
 //  (a ThorVG wg canvas costs tens of milliseconds to make; this image,
 //  microseconds).
 //
-//  The copy is recorded by `update`, into the frame's own command buffer.
-//  The engine updates nodes in list order, so the host lists the source
+//  The copy is recorded by `update`, into the device's render
+//  (`VulkanRenderDevice.render`). Nodes are updated in list order, so the
+//  host lists the source
 //  before the images copying out of it: the source's own update has then
 //  drawn it, waited for its writer (`waitForExternalCompletion`) and left
 //  it in `ImageCopy.sourceLayout` by the time the copy reads it, and the
@@ -68,7 +69,7 @@ public struct ImageCopy: Sendable {
 @Observable
 public final class ImageNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
 
-    public typealias Engine = VulkanRenderEngine<ContainerNode>
+    public typealias Device = VulkanRenderDevice<ContainerNode>
 
     @ObservationIgnored public var width:  UInt32
     @ObservationIgnored public var height: UInt32
@@ -120,7 +121,7 @@ extension ImageNode {
     /// against a composite in flight that may still be sampling the old
     /// content — and the copy between them. Nothing pending, nothing
     /// recorded.
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         guard slot.needsRender, let copy = pendingCopy else { return }
         pendingCopy = nil
 
@@ -188,19 +189,22 @@ extension ImageNode {
             dstStage:  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
         )
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        // Sampleable from this command buffer on: the composite that
-        // follows in the same frame sees the copy.
-        engine.readable.insert(slot.id)
+        // Sampleable from this render on: a composite submitted after it,
+        // in any window, sees the copy.
+        device.readable.insert(slot.id)
     }
 
-    /// Free the image, view and memory this node owns. Drains the device
-    /// first: no in-flight frame may still sample the image.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
+    /// Free the image, view and memory this node owns, once no frame in
+    /// flight — in any window — still samples the image.
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let imageView = imageView, image = image, memory = memory
+        device.releaseAfterInFlightWork {
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
         }
     }
 }

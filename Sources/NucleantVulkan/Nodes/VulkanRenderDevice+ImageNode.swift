@@ -1,8 +1,8 @@
 //
-//  VulkanRenderEngine+ImageNode.swift
+//  VulkanRenderDevice+ImageNode.swift
 //  NucleantVulkan
 //
-//  The copy-target node factory: an engine-owned image with nothing in it
+//  The copy-target node factory: an image on the device with nothing in it
 //  yet, for `ImageNode`. Generic (no backend library), so it lives in the
 //  engine core alongside the node itself.
 //
@@ -10,15 +10,15 @@ import VulkanCore
 import CVulkan
 
 
-extension VulkanRenderEngine {
+extension VulkanRenderDevice {
 
-    /// Build a copy-target node: an engine-owned image (TRANSFER_DST +
-    /// SAMPLED, device-local, OPTIMAL tiling) at `width × height`. The image
-    /// starts UNDEFINED — the node's first copy takes it from there, and
-    /// until that copy is recorded the engine keeps it out of the composite.
-    /// The engine does not own the resources — `destroyResources(_:)` frees
-    /// them when the node is dropped. Callers append the returned node
-    /// themselves.
+    /// Build a copy-target node: an image on the device (TRANSFER_DST +
+    /// SAMPLED, + TRANSFER_SRC for `readPixels`; device-local, OPTIMAL
+    /// tiling) at `width × height`. The image starts UNDEFINED — the node's
+    /// first copy takes it from there, and until that copy is recorded no
+    /// window composites it. The device does not own the resources —
+    /// `destroyResources(_:)` frees them when the node is dropped. Callers
+    /// append the returned node to whichever windows show it.
     ///
     /// `format` is the image's — `nil` for the wgpu render targets' pixel
     /// order (`WgpuContext.targetPixelOrder`), so a copy out of a canvas
@@ -49,6 +49,7 @@ extension VulkanRenderEngine {
         imageInfo.tiling        = VK_IMAGE_TILING_OPTIMAL
         imageInfo.usage         = VkImageUsageFlags(
             VK_IMAGE_USAGE_TRANSFER_DST_BIT.rawValue |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT.rawValue |
             VK_IMAGE_USAGE_SAMPLED_BIT.rawValue
         )
         imageInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE

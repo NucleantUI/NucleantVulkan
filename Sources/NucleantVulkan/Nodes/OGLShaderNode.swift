@@ -9,7 +9,7 @@ import Observation
 @Observable
 public final class OGLShaderNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
 
-    public typealias Engine = VulkanRenderEngine<ContainerNode>
+    public typealias Device = VulkanRenderDevice<ContainerNode>
 
     // public struct TextureInput {
     // ^ promoted to an @Observable class: a struct copy freezes the
@@ -136,7 +136,7 @@ extension OGLShaderNode {
     /// the compute dispatch writes the whole image. Without an installed
     /// pipeline the node has no content, so it stays unpublished (never
     /// enters `readable`) instead of compositing garbage.
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         guard slot.needsRender else { return }
         guard let pipeline = computePipeline,
               let layout   = computeLayout,
@@ -168,21 +168,25 @@ extension OGLShaderNode {
             dstStage:  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
         )
         currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-        engine.readable.insert(slot.id)
+        device.readable.insert(slot.id)
         // slot.needsRender deliberately not cleared — same steady-state as
         // the thor/skia node updates until the canvas side drives updates
         // through the Observation chain.
     }
 
-    /// Free the image/view/memory this node owns. Registered `textureInputs`
-    /// are borrowed (their creator owns and frees them), so they are left
+    /// Free the image/view/memory this node owns, once no frame in flight —
+    /// in any window — still samples it. Registered `textureInputs` are
+    /// borrowed (their creator owns and frees them), so they are left
     /// untouched here.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let imageView = imageView, image = image, memory = memory
+        device.releaseAfterInFlightWork {
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
         }
     }
 }

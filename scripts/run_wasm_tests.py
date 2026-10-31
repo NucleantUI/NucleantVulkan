@@ -73,7 +73,10 @@ def find_chrome(explicit: str | None) -> str:
 def build_tests() -> Path:
     swift, sdk = find_wasm_sdk()
     env = dict(os.environ, WASM_BUILD="1")
-    command = [swift, "build", "--build-tests", "--swift-sdk", sdk, "--scratch-path", str(SCRATCH)]
+    # The test product, not every target: the RenderNodeBuilder plugin's
+    # generator runs on the build machine and isn't built for wasm.
+    command = [swift, "build", "--product", "NucleantVulkanPackageTests", "--swift-sdk", sdk,
+               "--scratch-path", str(SCRATCH)]
     print("+", " ".join(command), flush=True)
     if subprocess.run(command, cwd=PACKAGE_ROOT, env=env).returncode != 0:
         sys.exit("error: building the tests for wasm failed")

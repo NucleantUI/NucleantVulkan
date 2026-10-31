@@ -15,8 +15,8 @@
 //  documents that the surface must not be touched once the callback
 //  returns. A composite that sampled the producer's surface directly would
 //  read a frame the producer is already rewriting. So the copy is submitted
-//  on the engine's own queue and waited for before the write returns
-//  (`VulkanRenderEngine.writeExternalTexture`): queue order and the copy's
+//  on the device's queue and waited for before the write returns
+//  (`VulkanRenderDevice.writeExternalTexture`): queue order and the copy's
 //  barriers then make every later composite see a whole frame, and every
 //  earlier one finish sampling the old frame before it is overwritten.
 //
@@ -32,7 +32,7 @@ import Observation
 @Observable
 public final class ExternalTextureNode<ContainerNode: RenderContainerNode>: VulkanRenderNode, @unchecked Sendable {
 
-    public typealias Engine = VulkanRenderEngine<ContainerNode>
+    public typealias Device = VulkanRenderDevice<ContainerNode>
 
     @ObservationIgnored public var width:  UInt32
     @ObservationIgnored public var height: UInt32
@@ -118,51 +118,56 @@ public final class ExternalTextureNode<ContainerNode: RenderContainerNode>: Vulk
 extension ExternalTextureNode {
     /// Nothing to record: writes are submitted when the producer makes them.
     /// Only publishes the image to the composite once one has landed.
-    public func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer) {
+    public func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer) {
         guard hasContent else { return }
-        engine.readable.insert(slot.id)
+        device.readable.insert(slot.id)
     }
 
-    /// Free the image, the write path's command buffer, fence and staging
-    /// buffer, and every imported surface. Drains the device first: no
-    /// in-flight frame may still sample the image.
-    public func destroyResources(_ engine: Engine) {
-        vkDeviceWaitIdle(engine.device)
-        vkDestroyImageView(engine.device, imageView, nil)
-        vkDestroyImage(engine.device, image, nil)
-        if let memory {
-            vkFreeMemory(engine.device, memory, nil)
+    /// Free the image once no frame in flight — in any window — still
+    /// samples it; the write path's command buffer, fence and staging
+    /// buffer, and every imported surface, right away: every write was
+    /// waited for, so nothing in flight uses those.
+    public func destroyResources(_ device: Device) {
+        let vkDevice = device.device
+        let imageView = imageView, image = image, memory = memory
+        device.releaseAfterInFlightWork {
+            vkDestroyImageView(vkDevice, imageView, nil)
+            vkDestroyImage(vkDevice, image, nil)
+            if let memory {
+                vkFreeMemory(vkDevice, memory, nil)
+            }
         }
-        releaseWriteResources(engine)
+        releaseWriteResources(device)
     }
 
     /// Everything but the image itself — also what a resize keeps: the
     /// command buffer, fence and staging buffer outlive a size change, the
     /// imported surfaces do not need to (a resized producer presents new
     /// ones), so only those are dropped there.
-    func releaseWriteResources(_ engine: Engine) {
+    func releaseWriteResources(_ device: Device) {
         if let commandBuffer = writeCommandBuffer {
             var commandBufferOpt: VkCommandBuffer? = commandBuffer
-            vkFreeCommandBuffers(engine.device, engine.commandPool, 1, &commandBufferOpt)
+            vkFreeCommandBuffers(device.device, device.commandPool, 1, &commandBufferOpt)
             writeCommandBuffer = nil
         }
         if let fence = writeFence {
-            vkDestroyFence(engine.device, fence, nil)
+            device.didWait(on: fence)
+            vkDestroyFence(device.device, fence, nil)
             writeFence = nil
         }
         if let stagingMemory {
-            vkUnmapMemory(engine.device, stagingMemory)
-            vkFreeMemory(engine.device, stagingMemory, nil)
+            vkUnmapMemory(device.device, stagingMemory)
+            vkFreeMemory(device.device, stagingMemory, nil)
         }
         if let stagingBuffer {
-            vkDestroyBuffer(engine.device, stagingBuffer, nil)
+            vkDestroyBuffer(device.device, stagingBuffer, nil)
         }
         stagingBuffer = nil
         stagingMemory = nil
         stagingMapped = nil
         stagingSize = 0
         #if os(macOS) || os(iOS)
-        releaseImportedSurfaces(engine)
+        releaseImportedSurfaces(device)
         #endif
     }
 }

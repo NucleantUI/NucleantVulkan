@@ -23,17 +23,23 @@ public protocol VulkanRenderNode: AnyObject, Observable, Sendable {
     var dirty:                Bool              { get set }
     
     associatedtype ContainerNode: RenderContainerNode
-    associatedtype Engine: VulkanRenderEngine<ContainerNode>
+    associatedtype Device: VulkanRenderDevice<ContainerNode>
 
-    func update(_ engine: Engine, slot: ContainerNode, cmd: VkCommandBuffer)
+    /// Record this node's work for the frame into `cmd` — one of the
+    /// device's own command buffers (`VulkanRenderDevice.render`), submitted
+    /// ahead of any window's composite — and publish the image to
+    /// `device.readable` once it holds something to sample.
+    func update(_ device: Device, slot: ContainerNode, cmd: VkCommandBuffer)
 
     /// Tear down the GPU resources this node owns — its image/view/memory
-    /// and any node-specific surfaces (a Skia Ganesh surface, etc.). The
-    /// engine binds a node's image but never frees it, so the node releases
-    /// what it holds here when it's dropped (resize, detach). Implementations
-    /// drain the device first: no in-flight frame may still reference the
-    /// image. The node owns image/view/memory; anything the node only
-    /// borrowed (an imported wgpu texture, the ThorVG canvas handed to
-    /// Python) stays the borrower's to release.
-    func destroyResources(_ engine: Engine)
+    /// and any node-specific surfaces (a Skia Ganesh surface, etc.). A
+    /// window binds a node's image but never frees it, and the device
+    /// outlives every window, so whoever made the node releases what it
+    /// holds here when it's dropped (resize, detach). Implementations hand
+    /// the frees to `device.releaseAfterInFlightWork`: a frame still in
+    /// flight, in any window, may sample the image. The node owns
+    /// image/view/memory; anything the node only borrowed (an imported wgpu
+    /// texture, the ThorVG canvas handed to Python) stays the borrower's to
+    /// release.
+    func destroyResources(_ device: Device)
 }
