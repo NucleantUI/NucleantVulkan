@@ -1,0 +1,12 @@
+# NucleantVulkan's own nodes, generated into this test target by the
+# RenderNodeBuilder plugin the way a library generates its RenderNode.
+imports:
+    - NucleantVulkan
+
+RenderNode:
+  - ExternalTextureNode:
+      resize_to_window: true
+  - ImageNode:
+      observe: false
+  - PixelBufferShaderNode
+  - VertFragShaderNode

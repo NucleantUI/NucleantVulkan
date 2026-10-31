@@ -546,6 +546,9 @@ func getDependencies() -> [Package.Dependency] {
     } else {
         deps.append(.package(url: "https://github.com/NucleantUI/NucleantGeometry", .upToNextMinor(from: "0.0.1")))
     }
+    // Reads render-settings.yml for the RenderNodeBuilder plugin's generator,
+    // which runs on the build machine; fetched only where the plugin is used.
+    deps.append(.package(url: "https://github.com/jpsim/Yams", from: "6.0.0"))
     return deps
 }
 
@@ -968,9 +971,46 @@ func mainTargets() -> [Target] {
 }
 
 
+/// The RenderNodeBuilder build-tool plugin: a library's `render-settings.yml`
+/// becomes the RenderNode container its engine is generic over. The generator
+/// runs on the build machine, so these are the same for every platform.
+func renderNodeBuilderTargets() -> [Target] {
+    [
+        .plugin(
+            name: "RenderNodeBuilder",
+            capability: .buildTool(),
+            dependencies: ["RenderNodeGenerator"]
+        ),
+        .executableTarget(
+            name: "RenderNodeGenerator",
+            dependencies: ["RenderNodeSettings"]
+        ),
+        // The reading and the generating, apart from the tool's `main`: tests
+        // can't import an executable the plugin also runs (SwiftPM links it
+        // into the test bundle twice).
+        .target(
+            name: "RenderNodeSettings",
+            dependencies: [.product(name: "Yams", package: "Yams")]
+        ),
+        .testTarget(
+            name: "RenderNodeGeneratorTests",
+            dependencies: ["RenderNodeSettings"]
+        ),
+        // Uses the plugin the way a library does: its render-settings.yml
+        // lists this package's own nodes, and the tests drive the generated
+        // RenderNode through a real engine.
+        .testTarget(
+            name: "RenderNodeCheckTests",
+            dependencies: ["NucleantVulkan"],
+            plugins: ["RenderNodeBuilder"]
+        ),
+    ]
+}
+
 func getTargets() -> [Target] {
     var targets = mainTargets()
     targets.append(contentsOf: libraryTargets())
+    targets.append(contentsOf: renderNodeBuilderTargets())
     return targets
 }
 
@@ -998,6 +1038,10 @@ func getProducts() -> [Product] {
         .library(
             name: "NucleantShader",
             targets: ["NucleantShader"]
+        ),
+        .plugin(
+            name: "RenderNodeBuilder",
+            targets: ["RenderNodeBuilder"]
         ),
     ]
 }
