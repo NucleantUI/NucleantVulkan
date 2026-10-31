@@ -360,17 +360,19 @@ jobs:
           fi
           "$setup"
       # Cross-compiled: builds and links the tests, which no device runs here.
+      # The test product, not every target: the RenderNodeBuilder plugin's
+      # generator runs on the build machine and isn't built for Android.
       - run: mkdir -p Artifacts && cp dist/*.zip Artifacts/
       - name: Build against them, arm64-v8a
         env:
           ANDROID_BUILD: "1"
           SWIFT_ANDROID_ABI: arm64-v8a
-        run: swift build --swift-sdk aarch64-unknown-linux-android28 --build-tests
+        run: swift build --swift-sdk aarch64-unknown-linux-android28 --product NucleantVulkanPackageTests
       - name: Build against them, x86_64
         env:
           ANDROID_BUILD: "1"
           SWIFT_ANDROID_ABI: x86_64
-        run: swift build --swift-sdk x86_64-unknown-linux-android28 --build-tests
+        run: swift build --swift-sdk x86_64-unknown-linux-android28 --product NucleantVulkanPackageTests
 
   wasm:
     # build_shader_tools_wasm.py compiles with the clang of the swift.org
