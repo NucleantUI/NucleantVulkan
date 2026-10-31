@@ -87,10 +87,6 @@ func wasmLibDir() -> String {
 
 let platformTarget = getPlatformTarget()
 
-/// The RenderNodeBuilder plugin and its generator run on the build machine, a
-/// desktop; a build for wasm or Android leaves them out, Yams with them.
-let buildsRenderNodeBuilder = platformTarget == .macOS || platformTarget == .linux || platformTarget == .windows
-
 // Set by pyswiftkit-builder for a wheel build. It distinguishes the two macOS
 // modes — `uv run` against a wheel, versus the Xcode app that embeds this
 // package — which differ in whether a dependency should be a bare dylib or a
@@ -552,9 +548,7 @@ func getDependencies() -> [Package.Dependency] {
     }
     // Reads render-settings.yml for the RenderNodeBuilder plugin's generator,
     // which runs on the build machine; fetched only where the plugin is used.
-    if buildsRenderNodeBuilder {
-        deps.append(.package(url: "https://github.com/jpsim/Yams", from: "6.0.0"))
-    }
+    deps.append(.package(url: "https://github.com/jpsim/Yams", from: "6.0.0"))
     return deps
 }
 
@@ -998,9 +992,13 @@ func renderNodeBuilderTargets() -> [Target] {
             name: "RenderNodeSettings",
             dependencies: [.product(name: "Yams", package: "Yams")]
         ),
+        // Desktop only: the generator runs on the build machine, and Yams,
+        // which it reads the settings with, doesn't compile for WASI.
         .testTarget(
             name: "RenderNodeGeneratorTests",
-            dependencies: ["RenderNodeSettings"]
+            dependencies: [
+                .target(name: "RenderNodeSettings", condition: .when(platforms: [.macOS, .linux, .windows]))
+            ]
         ),
         // Uses the plugin the way a library does: its render-settings.yml
         // lists this package's own nodes, and the tests drive the generated
@@ -1016,9 +1014,7 @@ func renderNodeBuilderTargets() -> [Target] {
 func getTargets() -> [Target] {
     var targets = mainTargets()
     targets.append(contentsOf: libraryTargets())
-    if buildsRenderNodeBuilder {
-        targets.append(contentsOf: renderNodeBuilderTargets())
-    }
+    targets.append(contentsOf: renderNodeBuilderTargets())
     return targets
 }
 
@@ -1034,7 +1030,7 @@ func getProducts() -> [Product] {
     let vulkanTargets: [String] = platformTarget == .linux || platformTarget == .android
         ? ["NucleantVulkan"]
         : ["NucleantVulkan", "CVulkan"]
-    var products: [Product] = [
+    return [
         .library(
             name: "NucleantVulkan",
             targets: vulkanTargets
@@ -1047,14 +1043,11 @@ func getProducts() -> [Product] {
             name: "NucleantShader",
             targets: ["NucleantShader"]
         ),
-    ]
-    if buildsRenderNodeBuilder {
-        products.append(.plugin(
+        .plugin(
             name: "RenderNodeBuilder",
             targets: ["RenderNodeBuilder"]
-        ))
-    }
-    return products
+        ),
+    ]
 }
 
 let package = Package(

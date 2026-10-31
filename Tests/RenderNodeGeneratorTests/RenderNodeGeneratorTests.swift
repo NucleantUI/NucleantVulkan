@@ -1,3 +1,4 @@
+#if canImport(RenderNodeSettings)
 import Testing
 @testable import RenderNodeSettings
 
@@ -232,3 +233,4 @@ import Testing
         #expect(source.contains("    public func observeContext() {\n    }\n"))
     }
 }
+#endif
