@@ -35,6 +35,15 @@
 # The archives are this run's artifacts ("vulkan-*"). Run it by hand to check
 # that the dependencies still build; release.yml runs it for each release
 # and attaches the archives to it.
+#
+# A platform whose libraries' inputs are unchanged since the last release —
+# the build scripts, which pin every dependency's tag and set its options,
+# and the NDK or Swift version where they matter — is not built again: its
+# archives are that release's (scripts/reuse_release_libraries.py), and only
+# its packaging check and tests run. Each release records the fingerprints in
+# its deps.json for the next. `rebuild` builds everything regardless; bump
+# DEPS_REVISION after changing how a job below builds its libraries, which
+# the fingerprints cannot see.
 
 name: build-deps
 
@@ -46,12 +55,20 @@ on:
         type: choice
         options: [all, apple, linux, windows, android, wasm]
         default: all
+      rebuild:
+        description: Build every library from source, even if unchanged since the last release
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       version:
         description: Version written into the artifact bundles' info.json
         type: string
         default: 0.0.0
+      rebuild:
+        description: Build every library from source, even if unchanged since the last release
+        type: boolean
+        default: false
 
 env:
   SWIFT_VERSION: 6.3.3
@@ -60,6 +77,11 @@ env:
   NUCLEANT_LOCAL_DEV: "0"
   # Package.swift takes the libraries from Artifacts/, where the tests put them.
   NUCLEANT_VULKAN_ARTIFACTS: "1"
+  # Part of every platform's fingerprint: bump it to rebuild them all after
+  # changing how a job here builds its libraries.
+  DEPS_REVISION: "1"
+  # NDK r28, as Skia's Android build. In Android's fingerprint.
+  ANDROID_NDK_VERSION: r28c
 
 jobs:
   apple:
@@ -71,45 +93,69 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
+      - name: Libraries from the last release, if unchanged
+        id: reuse
+        if: ${{ !inputs.rebuild }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/reuse_release_libraries.py fetch apple --version "$VERSION" --output dist
       - run: brew install ninja
+        if: steps.reuse.outputs.reused != 'true'
       # Each library a step per architecture (or slice, or platform), then a
       # step that finds them all built and makes the xcframeworks.
       - name: wgpu-native macOS arm64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --apple-target aarch64-apple-darwin
       - name: wgpu-native macOS x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --apple-target x86_64-apple-darwin
       - name: wgpu-native iOS arm64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --apple-target aarch64-apple-ios
       - name: wgpu-native iOS simulator arm64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --apple-target aarch64-apple-ios-sim
       - name: wgpu-native iOS simulator x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --apple-target x86_64-apple-ios
       - name: wgpu-native xcframeworks
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py
       - name: shaderc + spirv-cross macOS (arm64 + x86_64)
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_shader_tools.py --apple --slice macos
       - name: shaderc + spirv-cross iOS arm64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_shader_tools.py --apple --slice ios
       - name: shaderc + spirv-cross iOS simulator (arm64 + x86_64)
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_shader_tools.py --apple --slice ios-simulator
       - name: shaderc + spirv-cross xcframeworks
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_shader_tools.py --apple
       # MoltenVK: its dependencies for every platform first (each run of
       # fetchDependencies cleans MoltenVK), then MoltenVK per platform, each
       # adding its platform to the xcframework; the last step installs it.
       - name: MoltenVK dependencies macOS
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --dependencies macos
       - name: MoltenVK dependencies iOS
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --dependencies ios
       - name: MoltenVK dependencies iOS simulator
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --dependencies iossim
       - name: MoltenVK macOS
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --platform macos
       - name: MoltenVK iOS
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --platform ios
       - name: MoltenVK iOS simulator
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --platform iossim
       - name: MoltenVK xcframeworks
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           python scripts/build_vulkan.py --install-only
           # Every platform made it in: one slice each.
@@ -118,16 +164,21 @@ jobs:
           for i in $(seq 0 $((slices - 1))); do plutil -extract "AvailableLibraries.$i.LibraryIdentifier" raw "$plist"; done
           test "$slices" -eq 3
       - name: Package
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           mkdir -p dist
           for x in MoltenVK MoltenVK_lib wgpu_native wgpu_native_framework shaderc spirv-cross; do
             ditto -c -k --keepParent "Dependencies/macos/$x.xcframework" "dist/$x.xcframework.zip"
           done
           ls -l dist
+      - name: Fingerprint
+        run: python scripts/reuse_release_libraries.py record apple --output dist
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-apple
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/fingerprint-*.txt
       - name: Install Swift ${{ env.SWIFT_VERSION }}
         run: |
           release="swift-${SWIFT_VERSION}-RELEASE"
@@ -166,19 +217,30 @@ jobs:
           apt-get update && apt-get install -y
           gcc g++ git curl python3 pkg-config libclang-dev cmake ninja-build patchelf
           libwayland-dev libxcb1-dev libx11-dev libx11-xcb-dev libxrandr-dev
+      - name: Libraries from the last release, if unchanged
+        id: reuse
+        if: ${{ !inputs.rebuild }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/reuse_release_libraries.py fetch linux-${{ matrix.arch }} --version "$VERSION" --output dist
       - name: Rust
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: wgpu-native ${{ matrix.arch }}
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           rm -rf Dependencies/linux/lib
           python3 scripts/build_wgpu.py --prefix Dependencies/linux
       - name: Vulkan loader ${{ matrix.arch }}
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_vulkan.py
       - name: shaderc + spirv-cross ${{ matrix.arch }}
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_shader_tools.py --linux
       - name: Package ${{ matrix.arch }}
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           lib=Dependencies/linux/lib
           for so in libvulkan.so libwgpu_native.so libshaderc_shared.so libspirv-cross-c-shared.so; do
@@ -190,10 +252,14 @@ jobs:
               --library "$lib/${pair#*:}" \
               --name "${pair%%:*}-linux-${{ matrix.arch }}" --output dist --version "$VERSION"
           done
+      - name: Fingerprint
+        run: python3 scripts/reuse_release_libraries.py record linux-${{ matrix.arch }} --output dist
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-linux-${{ matrix.arch }}
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/fingerprint-*.txt
 
   linux-test:
     name: linux test (${{ matrix.arch }})
@@ -236,13 +302,24 @@ jobs:
       # The sources and builds in a short path: MSBuild's intermediate
       # directories under shaderc's third_party run past MAX_PATH from the
       # workspace.
+      - name: Libraries from the last release, if unchanged
+        id: reuse
+        if: ${{ !inputs.rebuild }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/reuse_release_libraries.py fetch windows-x86_64 --version "$VERSION" --output dist
       - name: wgpu-native x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_wgpu.py --work-dir C:\w
       - name: Vulkan loader x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_vulkan.py --work-dir C:\w
       - name: shaderc + spirv-cross x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python scripts/build_shader_tools.py --work-dir C:\w
       - name: Package x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           $lib = "Dependencies/windows"
           foreach ($pair in "vulkan-loader:vulkan-1", "wgpu_native:wgpu_native",
@@ -254,10 +331,15 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Get-ChildItem dist
+      - name: Fingerprint
+        shell: bash
+        run: python scripts/reuse_release_libraries.py record windows-x86_64 --output dist
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-windows-x86_64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/fingerprint-*.txt
 
   windows-test:
     name: windows test (x86_64)
@@ -304,27 +386,41 @@ jobs:
       - run: >
           apt-get update && apt-get install -y
           g++ curl unzip python3 cmake ninja-build pkg-config libclang-dev
+      - name: Libraries from the last release, if unchanged
+        id: reuse
+        if: ${{ !inputs.rebuild }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/reuse_release_libraries.py fetch android --version "$VERSION" --output dist
       - name: Rust
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      # NDK r28, as Skia's Android build.
+      # Always: the cross-compile of the tests below links against its
+      # sysroot.
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
-          ndk-version: r28c
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
           add-to-path: false
       - run: echo "ANDROID_NDK_HOME=${{ steps.ndk.outputs.ndk-path }}" >> "$GITHUB_ENV"
       - run: rm -rf Dependencies/android
+        if: steps.reuse.outputs.reused != 'true'
       - name: wgpu-native arm64-v8a
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_wgpu.py --android --abis arm64-v8a
       - name: wgpu-native x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_wgpu.py --android --abis x86_64
       - name: shaderc + spirv-cross arm64-v8a
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_shader_tools.py --abis arm64-v8a
       - name: shaderc + spirv-cross x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: python3 scripts/build_shader_tools.py --abis x86_64
       - name: Package arm64-v8a
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           for pair in wgpu_native:libwgpu_native.so shaderc:libshaderc_shared.so \
                       spirv-cross:libspirv-cross-c-shared.so; do
@@ -333,6 +429,7 @@ jobs:
               --name "${pair%%:*}-android-arm64-v8a" --output dist --version "$VERSION"
           done
       - name: Package x86_64
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           for pair in wgpu_native:libwgpu_native.so shaderc:libshaderc_shared.so \
                       spirv-cross:libspirv-cross-c-shared.so; do
@@ -340,10 +437,14 @@ jobs:
               --library "Dependencies/android/x86_64/lib/${pair#*:}" \
               --name "${pair%%:*}-android-x86_64" --output dist --version "$VERSION"
           done
+      - name: Fingerprint
+        run: python3 scripts/reuse_release_libraries.py record android --output dist
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-android
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/fingerprint-*.txt
       - name: Swift's Android SDK
         run: |
           release="swift-${SWIFT_VERSION}-RELEASE"
@@ -395,12 +496,21 @@ jobs:
             "https://download.swift.org/swift-${SWIFT_VERSION}-release/wasm-sdk/${release}/${release}_wasm.artifactbundle.tar.gz" \
             --checksum cabfa08b73bb8ac783927ecd15fa386e99d0c139c5f232445067bcf58379cae7
           echo "TOOLCHAIN_BIN=$bin" >> "$GITHUB_ENV"
+      - name: Libraries from the last release, if unchanged
+        id: reuse
+        if: ${{ !inputs.rebuild }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/reuse_release_libraries.py fetch wasm --version "$VERSION" --output dist
       - run: brew install ninja
+        if: steps.reuse.outputs.reused != 'true'
       - name: shaderc and spirv-cross
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           rm -rf Dependencies/wasm
           python scripts/build_shader_tools_wasm.py
       - name: Package
+        if: steps.reuse.outputs.reused != 'true'
         run: |
           lib=Dependencies/wasm/lib
           spirv_cross=$(ls $lib/libspirv-cross-*.a | paste -sd, -)
@@ -410,10 +520,14 @@ jobs:
           python scripts/make_artifactbundle.py --triple wasm32-unknown-wasip1 \
             --library "libspirv-cross.a=$spirv_cross" \
             --name spirv-cross-wasm32 --output dist --version "$VERSION" --ar "$TOOLCHAIN_BIN/llvm-ar"
+      - name: Fingerprint
+        run: python scripts/reuse_release_libraries.py record wasm --output dist
       - uses: actions/upload-artifact@v7
         with:
           name: vulkan-wasm32
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/fingerprint-*.txt
       # In headless Chrome on the page's WebGPU.
       - name: Test against it
         run: |

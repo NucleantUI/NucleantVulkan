@@ -2,7 +2,9 @@
 #
 #   1. check     the version is X.Y.Z;
 #   2. deps      builds and tests every platform's libraries from source
-#                (build-deps.yml), the archives as artifacts;
+#                (build-deps.yml), the archives as artifacts — or, for a
+#                platform whose libraries' inputs are unchanged since the last
+#                release, takes that release's archives and tests them;
 #   3. release   makes the release commit on top of master, the commit it ran
 #                on:
 #                  * Package.swift's `releasedVulkan` filled in (replacing the
@@ -13,7 +15,9 @@
 #                    platform and architecture being built;
 #                  * no Dependencies/: the libraries are the release's.
 #                Then tags it with the version, publishes the GitHub release
-#                with the archives, and pushes the commit to master — last,
+#                with the archives and deps.json (each platform's fingerprint,
+#                which the next release compares against), and pushes the
+#                commit to master — last,
 #                so master never names archives that are not up yet. Master
 #                and the tag then build from the same archives. A version
 #                already released is re-released: its release and tag are
@@ -36,6 +40,10 @@ on:
         description: Version to release, X.Y.Z (the tag)
         type: string
         required: true
+      rebuild:
+        description: Build every library from source, even if unchanged since the last release
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -62,6 +70,7 @@ jobs:
     uses: ./.github/workflows/build-deps.yml
     with:
       version: ${{ inputs.version }}
+      rebuild: ${{ inputs.rebuild }}
 
   release:
     needs: deps
@@ -104,6 +113,12 @@ jobs:
           do
             [ -f "dist/$archive" ] || { echo "::error::no $archive"; exit 1; }
           done
+      # Each platform's fingerprint, from the job that built (or reused) its
+      # archives: the next release reuses the ones still matching.
+      - name: deps.json
+        run: |
+          python3 scripts/reuse_release_libraries.py collect dist > dist/deps.json
+          cat dist/deps.json
       - name: Release commit
         run: |
           python3 - <<'EOF'
@@ -191,7 +206,7 @@ jobs:
           git push --force origin "refs/tags/$TAG"
           # A draft until every archive is up, so nobody resolves a release
           # that is missing one.
-          gh release create "$TAG" dist/*.zip --verify-tag --draft --title "$TAG" \
+          gh release create "$TAG" dist/*.zip dist/deps.json --verify-tag --draft --title "$TAG" \
             --notes "Prebuilt libraries for every platform; SwiftPM downloads the one it builds for."
           gh release edit "$TAG" --draft=false
           # Master builds from this release from now on. Refused if master
