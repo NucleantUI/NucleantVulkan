@@ -885,6 +885,24 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps)
 
         var newExtent = caps.currentExtent
+        #if os(Android)
+        // The surface's own size, as the platform window reports it — not
+        // currentExtent. Android gives currentExtent in the display's natural
+        // orientation whenever the surface's transform hint is a rotation,
+        // which it still is for a while after the device turns: taken as is,
+        // a swapchain built during that window keeps the old shape, and the
+        // compositor stretches it over the turned surface. Every view that
+        // composites into a rect of its own then lands in the wrong place.
+        // With the IDENTITY preTransform below, the images are meant to be
+        // exactly the surface as laid out now, which is `getExtent()`.
+        let drawable = getExtent()
+        if drawable.width > 0, drawable.height > 0 {
+            newExtent = VkExtent2D(
+                width: min(max(drawable.width, caps.minImageExtent.width), caps.maxImageExtent.width),
+                height: min(max(drawable.height, caps.minImageExtent.height), caps.maxImageExtent.height)
+            )
+        }
+        #else
         if newExtent.width == UInt32.max {
             let drawable = getExtent()
             newExtent = VkExtent2D(
@@ -892,6 +910,7 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
                 height: max(drawable.height, 1)
             )
         }
+        #endif
         guard newExtent.width > 0, newExtent.height > 0 else {
             throw VulkanEngineError.swapchain(0)
         }
