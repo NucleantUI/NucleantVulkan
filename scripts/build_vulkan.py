@@ -42,7 +42,7 @@ MOLTENVK_DYLIB = "libMoltenVK.dylib"
 # --- Upstream sources ------------------------------------------------------
 
 MOLTENVK_REPO = "https://github.com/KhronosGroup/MoltenVK.git"
-MOLTENVK_REF = "v1.2.11"
+MOLTENVK_REF = "v1.3.0"
 
 VULKAN_LOADER_REPO = "https://github.com/KhronosGroup/Vulkan-Loader.git"
 # The loader the release's Linux artifact bundle ships, at the version of the
