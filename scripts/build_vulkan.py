@@ -44,6 +44,21 @@ MOLTENVK_DYLIB = "libMoltenVK.dylib"
 MOLTENVK_REPO = "https://github.com/KhronosGroup/MoltenVK.git"
 MOLTENVK_REF = "v1.3.0"
 
+# MoltenVK allows draws with a non-zero base vertex or base instance only on
+# GPU Family Apple 3 and up. The iOS Simulator's Metal device reports Apple 2
+# whatever device it simulates, so MoltenVK refuses those draws there
+# (VK_ERROR_FEATURE_NOT_PRESENT), and Skia's Vulkan backend makes them all
+# the time: nothing Skia draws shows in the simulator. The simulator's Metal
+# draws them all the same, so its build turns them back on, in MoltenVK's
+# own block of simulator adjustments (MVKDevice.mm, after the Apple 3 check).
+MOLTENVK_SIMULATOR_SOURCE = Path("MoltenVK", "MoltenVK", "GPUObjects", "MVKDevice.mm")
+MOLTENVK_SIMULATOR_BLOCK = "\t_metalFeatures.nativeTextureSwizzle = false;\n#endif"
+MOLTENVK_SIMULATOR_PATCH = (
+    "\t_metalFeatures.nativeTextureSwizzle = false;\n"
+    "\t_metalFeatures.baseVertexInstanceDrawing = true;\n"
+    "#endif"
+)
+
 VULKAN_LOADER_REPO = "https://github.com/KhronosGroup/Vulkan-Loader.git"
 # The loader the release's Linux artifact bundle ships, at the version of the
 # Vulkan headers every platform compiles against (Sources/CVulkan,
@@ -194,10 +209,25 @@ def install_moltenvk_lib_xcframework() -> None:
     log("MoltenVK_lib.xcframework installed")
 
 
+def patch_moltenvk(src: Path) -> None:
+    """MOLTENVK_SIMULATOR_PATCH into the checkout, after every sync_repo
+    (whose `checkout --force` takes it out again)."""
+    source = src / MOLTENVK_SIMULATOR_SOURCE
+    text = source.read_text()
+    if MOLTENVK_SIMULATOR_PATCH in text:
+        return
+    if text.count(MOLTENVK_SIMULATOR_BLOCK) != 1:
+        sys.exit(f"error: {MOLTENVK_SIMULATOR_SOURCE} has no single simulator block to patch: "
+                 "check MOLTENVK_SIMULATOR_PATCH against this MoltenVK")
+    source.write_text(text.replace(MOLTENVK_SIMULATOR_BLOCK, MOLTENVK_SIMULATOR_PATCH))
+    log("patched MoltenVK: base vertex/instance draws in the iOS Simulator")
+
+
 def build_moltenvk(work_dir: Path, ref: str, jobs: int) -> None:
     require("xcodebuild")
     src = work_dir / "MoltenVK"
     sync_repo(MOLTENVK_REPO, ref, src)
+    patch_moltenvk(src)
 
     # fetchDependencies builds SPIRV-Cross / glslang / etc. for each platform.
     log("fetching MoltenVK dependencies (this is slow on a cold checkout)")
@@ -248,6 +278,7 @@ def build_moltenvk_dependencies(work_dir: Path, ref: str, platform_flag: str) ->
     require("xcodebuild")
     src = work_dir / "MoltenVK"
     sync_repo(MOLTENVK_REPO, ref, src)
+    patch_moltenvk(src)
     run(["./fetchDependencies", "--keep-cache", platform_flag], cwd=src)
 
 
