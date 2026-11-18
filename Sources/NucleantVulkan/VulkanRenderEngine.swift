@@ -59,6 +59,7 @@ public enum VulkanEngineError: Error {
 /// device. Each frame the device updates dirty nodes (ThorVG draw / compute
 /// dispatch + layout barriers) and the engine blends every published node's
 /// image onto the swapchain with the alpha-blending `CompositePipeline`.
+/// Node images hold premultiplied colour.
 public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanContext {
 
     // MARK: Device
@@ -807,11 +808,10 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
         guard result == VK_SUCCESS else { throw VulkanEngineError.renderPass }
     }
 
-    /// One-slot composite: each node draws a fullscreen alpha-blended quad
-    /// sampling its own image, so slots can be appended without rebuilding
-    /// the pipeline.
-    private func createCompositePipeline() throws {
-        let fragmentSource = """
+    /// What the composite draws for a node: its image's texel, unchanged —
+    /// premultiplied, as `CompositePipeline` blends it.
+    static var compositeFragmentSource: String {
+        """
         #version 450
         layout(location = 0) in vec2 vTexCoord;
         layout(location = 0) out vec4 fragColor;
@@ -821,10 +821,16 @@ public final class VulkanRenderEngine<RenderNode: RenderContainerNode>: VulkanCo
             fragColor = texture(nodeImage, vTexCoord);
         }
         """
+    }
+
+    /// One-slot composite: each node draws a fullscreen alpha-blended quad
+    /// sampling its own image, so slots can be appended without rebuilding
+    /// the pipeline.
+    private func createCompositePipeline() throws {
         guard
             let vertSPIRV = VKShaderCompiler.shared.getDefaultVertexSPIRV(),
             let fragSPIRV = VKShaderCompiler.shared.compile(
-                source:   fragmentSource,
+                source:   Self.compositeFragmentSource,
                 stage:    .fragment,
                 filename: "engine_composite.frag"
             ),
