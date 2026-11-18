@@ -112,107 +112,107 @@ let ANDROID_USE_AHARDWAREBUFFER = ProcessInfo.processInfo.environment["NUCLEANT_
 /// release.
 let releasedVulkan: [String: (url: String, checksum: String)] = [
     "MoltenVK.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/MoltenVK.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/MoltenVK.xcframework.zip",
         checksum: "92c7e284198df6f2446e49d7d330582e06aa76da6d4113f909770932f7365d8b"
     ),
     "MoltenVK_lib.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/MoltenVK_lib.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/MoltenVK_lib.xcframework.zip",
         checksum: "edb37f40bc0fb3f73cf5950a2e906d47930f91d6d1378fbd34dade811adcf6d8"
     ),
     "shaderc-android-arm64-v8a.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-android-arm64-v8a.artifactbundle.zip",
-        checksum: "8c52c7d9f9c6835128169d28e91c0423931cb92bee9134359352fc35b304b2f4"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-android-arm64-v8a.artifactbundle.zip",
+        checksum: "48b28cafedb7e77780433f77539ceb15642f031d633dd8751e3a035c94cfd5e5"
     ),
     "shaderc-android-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-android-x86_64.artifactbundle.zip",
-        checksum: "a36dbf6f32f3237bb2a7a4721b39c36dafff6dd4f7bcce1ee95a6aa6a8e1be97"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-android-x86_64.artifactbundle.zip",
+        checksum: "545befe1036440f515d0170fe2e62d17f80643a3cac1aefabc2f54fcbefb5822"
     ),
     "shaderc-linux-aarch64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-linux-aarch64.artifactbundle.zip",
-        checksum: "33fe95e3e8ed0b55e3784e4b4c87f10c9efdc46176ad728b3e944a5ba7bbcb3e"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-linux-aarch64.artifactbundle.zip",
+        checksum: "fbaa6bd4d6c3b19fa940ebfdb3919431f618a247d24ad2ffc0953f3ae5e97ae4"
     ),
     "shaderc-linux-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-linux-x86_64.artifactbundle.zip",
-        checksum: "f9b9ee497c16fe9f9cc77b468b555c6b711c3dd73354fc2b67e940579ae7b64d"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-linux-x86_64.artifactbundle.zip",
+        checksum: "2fa92d5e4ccd287eb7cdaf7126c7b95b3976a6fdeedd89928e5c021b1117b5a2"
     ),
     "shaderc-wasm32.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-wasm32.artifactbundle.zip",
-        checksum: "07bb5b51a4cdab1d91a947c2c68cb3753095108e2c501fb481dd7720d8739f59"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-wasm32.artifactbundle.zip",
+        checksum: "a6bbabb9ab0b0057dbad6ad86e946cb0c4c76193b152133ca11a476c5f7c9dfb"
     ),
     "shaderc-windows-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc-windows-x86_64.artifactbundle.zip",
-        checksum: "91b9ef31f3323a3478c296d26c9e4a68f8880c555dd4188ccbe886ed6239997e"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc-windows-x86_64.artifactbundle.zip",
+        checksum: "895f3617c6f3a5556f946cd018ea4393b207fefa701ff16044ff8cfd6f7e460a"
     ),
     "shaderc.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/shaderc.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/shaderc.xcframework.zip",
         checksum: "e5c6d7dacd24196329b5d9e0d8ef623c0f00c2f7f9f931150cf2ee6d1c8ca3a7"
     ),
     "spirv-cross-android-arm64-v8a.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-android-arm64-v8a.artifactbundle.zip",
-        checksum: "ebe7bc583b5bbfd26a9bbbd11c23c09e15d9423ac290333ddac0d3e6adc5feab"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-android-arm64-v8a.artifactbundle.zip",
+        checksum: "496cd64c24a54849ff3ee3a8129ec4f57f648ac5892e504ac81f8e2ec8be5fc6"
     ),
     "spirv-cross-android-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-android-x86_64.artifactbundle.zip",
-        checksum: "385e630158e3db564e8f1e64e9d13fb9a45ee8a33d09d95b4de2a89057dabbad"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-android-x86_64.artifactbundle.zip",
+        checksum: "6bf8c8761e1eb2de1f2cdf4a8e214bf6c9de7e9c94487d181d930ff7acbddc2f"
     ),
     "spirv-cross-linux-aarch64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-linux-aarch64.artifactbundle.zip",
-        checksum: "cddddcab9cbbd8d9d9bb0cbb9cea63dc7e311da421881ee493236ed069ca989f"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-linux-aarch64.artifactbundle.zip",
+        checksum: "224dfd60f5e82495a1ea99ccb25ca22df56ad503356bafc07f0cbea4c25e0a1a"
     ),
     "spirv-cross-linux-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-linux-x86_64.artifactbundle.zip",
-        checksum: "64df21a428d8970039d9503c5af5db792770dfe04e7eaddf94ecbe56fdeb4762"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-linux-x86_64.artifactbundle.zip",
+        checksum: "62ec0ce3a9c57eb3a7bd96017e92437d94223939b02e4133678920d0adca248d"
     ),
     "spirv-cross-wasm32.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-wasm32.artifactbundle.zip",
-        checksum: "3cb8391d3d7134826e9ac0383ef45bef3be802be19a018fb7d2dae6908b92254"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-wasm32.artifactbundle.zip",
+        checksum: "65f3e995d7c78362ee049489bc47f19086a994b5b27d326c7eef3165086467b1"
     ),
     "spirv-cross-windows-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross-windows-x86_64.artifactbundle.zip",
-        checksum: "4ea805d155f478fb48813ea255461d4b36778f3830074df33aa949a2118019d9"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross-windows-x86_64.artifactbundle.zip",
+        checksum: "c86f918b4fcdd4c3b4e6db635a36b5d1c67ef1b4069ea6918ac5f5945f049aea"
     ),
     "spirv-cross.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/spirv-cross.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/spirv-cross.xcframework.zip",
         checksum: "12f042983ab983e2ec9567a76a39f473319a21473eaae895a6d4bda74ab4f182"
     ),
     "vulkan-loader-linux-aarch64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/vulkan-loader-linux-aarch64.artifactbundle.zip",
-        checksum: "b77f3fc5b230b22e078cbe01ff194eab188d6a370d6edef4d75371037564e280"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/vulkan-loader-linux-aarch64.artifactbundle.zip",
+        checksum: "3944006e33d262303acc147c42faeaf8456a0dd68c9687e5fdfb1c07aca70d1f"
     ),
     "vulkan-loader-linux-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/vulkan-loader-linux-x86_64.artifactbundle.zip",
-        checksum: "eb3d0ab069377e219526aa0ec4858a874a713e39a59355a40487758c23ca13ad"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/vulkan-loader-linux-x86_64.artifactbundle.zip",
+        checksum: "1fabd9479442e68bc9b5f75a73f6865a9f5e70de5c02dc7d67afe4e18364272d"
     ),
     "vulkan-loader-windows-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/vulkan-loader-windows-x86_64.artifactbundle.zip",
-        checksum: "0f15d4c4a1916ee6c2be4c88348ddf21cd813f68c5a85084faf42a961c5cb55f"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/vulkan-loader-windows-x86_64.artifactbundle.zip",
+        checksum: "947d3645e16a31b32725594b314e499ed998cc27bb25674815cd63d807835fca"
     ),
     "wgpu_native-android-arm64-v8a.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native-android-arm64-v8a.artifactbundle.zip",
-        checksum: "da3d08da2a86f050bcfe7fc630849d809a5cbbc0225ffd2de34ed05395122803"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native-android-arm64-v8a.artifactbundle.zip",
+        checksum: "8fe489ec550cb01676197dcf319bf399ceb6416cc4328000a8ec8024fc2fa160"
     ),
     "wgpu_native-android-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native-android-x86_64.artifactbundle.zip",
-        checksum: "1629ff9572d9e0719a01523acfa07419cf5d8de2b2d2558ec9c21643c7d9b8f9"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native-android-x86_64.artifactbundle.zip",
+        checksum: "20716739c86e6881c6ba9aa37e2a41ebf8d82c5059bb4769be6578fb75427feb"
     ),
     "wgpu_native-linux-aarch64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native-linux-aarch64.artifactbundle.zip",
-        checksum: "8742ad388b6245b3d2c5bc385ff01bbbf0225740e0db640710deabb6f0eaa192"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native-linux-aarch64.artifactbundle.zip",
+        checksum: "c500d27c4b0158ff0fd9df0d2fc5010bff86442840e3d81884ce222f7daa831b"
     ),
     "wgpu_native-linux-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native-linux-x86_64.artifactbundle.zip",
-        checksum: "35b75d1a9ff200a8b1a9491ebe77bbb7c34b67f122c0582cb616f4647b56ff8a"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native-linux-x86_64.artifactbundle.zip",
+        checksum: "e780caed48871105fee0968586d66c7c4072038408a1aaf5e2fb150941cda5d5"
     ),
     "wgpu_native-windows-x86_64.artifactbundle.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native-windows-x86_64.artifactbundle.zip",
-        checksum: "ca9ca32b4069313a57feab17c77336d18ca566282610f9f24b672f494403cfcd"
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native-windows-x86_64.artifactbundle.zip",
+        checksum: "1540b1db7fb01b5089e8f584583f498d50931ca4e1cfec023e70e5c7cc93fe30"
     ),
     "wgpu_native.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native.xcframework.zip",
         checksum: "ea68488bef4d2b48b30ab18b18228b7b788103886f8778387751ba8ab2fd8828"
     ),
     "wgpu_native_framework.xcframework.zip": (
-        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.3/wgpu_native_framework.xcframework.zip",
+        url: "https://github.com/NucleantUI/NucleantVulkan/releases/download/0.1.4/wgpu_native_framework.xcframework.zip",
         checksum: "95fec1cbd43bc8f7bd419a134125b9c4110749d15fcb137c840af18834bed48d"
     ),
 ]
