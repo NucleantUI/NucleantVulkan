@@ -139,13 +139,18 @@ public final class CompositePipeline {
             multisample.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
             multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
 
+            // Node images hold premultiplied colour: what Skia, a vertex +
+            // fragment pass (`ColorAttachmentPass`) and an external texture
+            // write. So a node goes over what is under it as `src + dst ×
+            // (1 − srcα)`, colour and alpha alike. Weighting the colour by
+            // `srcα` again would apply a translucent pixel's alpha twice.
             var blendAtt = VkPipelineColorBlendAttachmentState()
             blendAtt.blendEnable         = VK_TRUE
-            blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA
+            blendAtt.srcColorBlendFactor = VK_BLEND_FACTOR_ONE
             blendAtt.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
             blendAtt.colorBlendOp        = VK_BLEND_OP_ADD
             blendAtt.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE
-            blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO
+            blendAtt.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
             blendAtt.alphaBlendOp        = VK_BLEND_OP_ADD
             blendAtt.colorWriteMask      = VkColorComponentFlags(
                 VK_COLOR_COMPONENT_R_BIT.rawValue | VK_COLOR_COMPONENT_G_BIT.rawValue |
